@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import argparse
+import json
+
+from canvas_todo import db
+from canvas_todo.dateutils import utc_now, week_of
+
+
+def upsert_items(conn, items: list[dict], wk: str) -> dict:
+    created = []
+    skipped = []
+    for item in items:
+        item_id, was_created = db.upsert_ungraded_item(
+            conn,
+            course_name=item["course_name"],
+            title=item["title"],
+            due_at=item.get("due_at"),
+            created_week=wk,
+        )
+        (created if was_created else skipped).append({"id": item_id, "title": item["title"]})
+    return {"created": created, "skipped_duplicates": skipped}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Upsert ungraded to-do items extracted from Canvas announcements"
+    )
+    parser.add_argument("--db", required=True, help="Path to SQLite database file")
+    parser.add_argument(
+        "--items-json",
+        required=True,
+        help='JSON array, e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+    )
+    args = parser.parse_args()
+
+    items = json.loads(args.items_json)
+    conn = db.get_connection(args.db)
+    db.init_db(conn)
+    wk = week_of(utc_now())
+    result = upsert_items(conn, items, wk)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
