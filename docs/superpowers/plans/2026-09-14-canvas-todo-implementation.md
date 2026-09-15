@@ -1299,7 +1299,28 @@ def test_build_digest_marks_new_items_with_marker(conn):
     now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
     result = digest.build_digest(conn, "2026-09-14", now)
     assert "🆕" in result["digest_text"]
+
+
+def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["digest.py", "--db", db_path])
+
+    def _boom(conn, wk, now):
+        raise ValueError("simulated unexpected failure")
+
+    with patch("canvas_todo.digest.build_digest", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            digest.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "simulated unexpected failure"}
 ```
+
+Note: this test needs `import json` and `from unittest.mock import patch` added to this file's imports (alongside the existing `sqlite3`, `datetime`, `pytest` imports) — this follows the same `try/except Exception` error-handling pattern established in `ingest.py::main()` (Task 5) and `upsert_ungraded.py::main()` (Task 6), applied here proactively for consistency rather than waiting for a review cycle to flag the same gap a third time.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1313,6 +1334,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timedelta
 
 from canvas_todo import db
@@ -1373,10 +1395,14 @@ def main() -> None:
 
     conn = db.get_connection(args.db)
     db.init_db(conn)
-    now = utc_now()
-    wk = week_of(now)
-    result = build_digest(conn, wk, now)
-    db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
+    try:
+        now = utc_now()
+        wk = week_of(now)
+        result = build_digest(conn, wk, now)
+        db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     print(json.dumps({"digest_text": result["digest_text"], "urgent_text": result["urgent_text"]}))
 
 
@@ -1387,7 +1413,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_digest.py -v`
-Expected: 3 passed
+Expected: 4 passed (3 core tests + 1 error-handling test, added proactively per the Task 5/6 `main()` error-handling precedent)
 
 - [ ] **Step 5: Commit**
 
