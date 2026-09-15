@@ -1770,9 +1770,12 @@ from flask import Flask, jsonify, render_template
 from canvas_todo import db
 from canvas_todo.dateutils import utc_now, week_of
 
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TEMPLATE_DIR = os.path.join(os.path.dirname(_PACKAGE_DIR), "templates")
+
 
 def create_app(db_path: str) -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder=_TEMPLATE_DIR)
     app.config["DB_PATH"] = db_path
 
     @app.route("/")
@@ -1805,6 +1808,8 @@ if __name__ == "__main__":
     app = create_app(os.environ.get("CANVAS_TODO_DB", "canvas_todo.db"))
     app.run(debug=True)
 ```
+
+Note: `Flask(__name__, template_folder=_TEMPLATE_DIR)` is required here, not `Flask(__name__)`. Since `web.py` lives inside the `canvas_todo` package, Flask's default template-folder resolution looks for `canvas_todo/templates/`, not the top-level `templates/` directory this task creates — verified empirically during implementation (`Flask('canvas_todo.web').root_path` resolves to the `canvas_todo/` directory itself). `_TEMPLATE_DIR` is computed as the `templates/` directory one level up from the package, keeping the top-level layout the plan specifies while making `render_template` actually find the file.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
