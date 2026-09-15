@@ -1518,7 +1518,27 @@ def test_send_message_raises_on_failure(mock_post):
     mock_post.return_value = MagicMock(status_code=400, text="bad request")
     with pytest.raises(RuntimeError):
         telegram_client.send_message("hello")
+
+
+def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
+    import sys as sys_module
+
+    monkeypatch.setattr(sys_module, "argv", ["telegram_client.py", "--message", "hello"])
+
+    def _boom(text):
+        raise RuntimeError("Telegram send failed: 400 bad request")
+
+    with patch("canvas_todo.telegram_client.send_message", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            telegram_client.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "Telegram send failed: 400 bad request"}
 ```
+
+Note: this test file needs `import json` added at the top alongside the other imports.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1531,7 +1551,9 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'canvas_todo.telegram_
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 
 import requests
 
@@ -1551,23 +1573,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Send a Telegram message")
     parser.add_argument("--message", required=True, help="Message text to send")
     args = parser.parse_args()
-    send_message(args.message)
+    try:
+        send_message(args.message)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
 ```
 
+Note: `main()` applies the same `try/except Exception` → clean JSON error → `sys.exit(1)` pattern established in Tasks 5–7, for consistency across all the project's CLIs even though nothing downstream currently parses this particular CLI's output.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_telegram_client.py -v`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add canvas_todo/telegram_client.py tests/test_telegram_client.py
-git commit -m "feat: add Telegram message-sending CLI"
+git commit -m "feat: add Telegram message-sending CLI with clean error handling"
 ```
 
 ---
