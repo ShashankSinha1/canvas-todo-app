@@ -19,6 +19,9 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
     reminded_ids = []
 
     for item in items:
+        if item["status"] == "done":
+            continue
+
         course = item["course_name"]
         by_course.setdefault(course, {"due": [], "overdue": [], "not_checked": []})
         reminded_ids.append(item["id"])
@@ -67,6 +70,14 @@ def main() -> None:
         now = utc_now()
         wk = week_of(now)
         result = build_digest(conn, wk, now)
+        # Marked as "reminded" here, before Telegram delivery is attempted (Task 8).
+        # Accepted tradeoff for this POC: if the send fails, these items won't show
+        # the 🆕 marker on a retry, but they still reappear in every future digest
+        # until resolved (get_items_for_week never drops unresolved items). Moving
+        # this to fire only after confirmed delivery would require passing ids
+        # through the scheduled agent's orchestration across two separate CLI
+        # invocations (digest.py then telegram_client.py) — not worth the added
+        # complexity for a single-user POC.
         db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))

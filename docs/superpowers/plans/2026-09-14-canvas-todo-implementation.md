@@ -1318,9 +1318,55 @@ def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypa
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert printed == {"error": "simulated unexpected failure"}
+
+
+def test_build_digest_routes_overdue_graded_item_to_overdue_section_only(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Late Quiz", due_at="2026-09-10T23:59:00Z",
+        status="overdue", canvas_assignment_id=1, created_week="2026-09-07",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "Overdue:" in result["digest_text"]
+    overdue_section = result["digest_text"].split("Overdue:")[1]
+    assert "Late Quiz" in overdue_section
+    due_section_present = "Due this week:" in result["digest_text"]
+    if due_section_present:
+        due_section = result["digest_text"].split("Due this week:")[1].split("Overdue:")[0]
+        assert "Late Quiz" not in due_section
+
+
+def test_new_marker_disappears_after_mark_reminded(conn):
+    item_id, _ = db.upsert_ungraded_item(
+        conn, course_name="CS101", title="Watch Lecture 4", due_at=None, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    first_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" in first_result["digest_text"]
+
+    db.mark_reminded(conn, first_result["reminded_ids"], now.isoformat())
+
+    second_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" not in second_result["digest_text"]
+    assert "Watch Lecture 4" in second_result["digest_text"]
+
+
+def test_build_digest_omits_done_items_and_their_course_header(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Finished Homework", due_at="2026-09-12T23:59:00Z",
+        status="done", canvas_assignment_id=1, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "CS101" not in result["digest_text"]
+    assert "Finished Homework" not in result["digest_text"]
+    assert result["reminded_ids"] == []
 ```
 
-Note: this test needs `import json` and `from unittest.mock import patch` added to this file's imports (alongside the existing `sqlite3`, `datetime`, `pytest` imports) — this follows the same `try/except Exception` error-handling pattern established in `ingest.py::main()` (Task 5) and `upsert_ungraded.py::main()` (Task 6), applied here proactively for consistency rather than waiting for a review cycle to flag the same gap a third time.
+Note: this test needs `import json` and `from unittest.mock import patch` added to this file's imports (alongside the existing `sqlite3`, `datetime`, `pytest` imports) — this follows the same `try/except Exception` error-handling pattern established in `ingest.py::main()` (Task 5) and `upsert_ungraded.py::main()` (Task 6), applied here proactively for consistency rather than waiting for a review cycle to flag the same gap a third time. The three additional tests above (overdue routing, marker clearing after `mark_reminded`, and `done`-item omission) were added during code review to close coverage gaps and lock in the Step 3 fix for dangling empty course headers.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1351,6 +1397,9 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
     reminded_ids = []
 
     for item in items:
+        if item["status"] == "done":
+            continue
+
         course = item["course_name"]
         by_course.setdefault(course, {"due": [], "overdue": [], "not_checked": []})
         reminded_ids.append(item["id"])
@@ -1399,6 +1448,14 @@ def main() -> None:
         now = utc_now()
         wk = week_of(now)
         result = build_digest(conn, wk, now)
+        # Marked as "reminded" here, before Telegram delivery is attempted (Task 8).
+        # Accepted tradeoff for this POC: if the send fails, these items won't show
+        # the 🆕 marker on a retry, but they still reappear in every future digest
+        # until resolved (get_items_for_week never drops unresolved items). Moving
+        # this to fire only after confirmed delivery would require passing ids
+        # through the scheduled agent's orchestration across two separate CLI
+        # invocations (digest.py then telegram_client.py) — not worth the added
+        # complexity for a single-user POC.
         db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
@@ -1413,7 +1470,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_digest.py -v`
-Expected: 4 passed (3 core tests + 1 error-handling test, added proactively per the Task 5/6 `main()` error-handling precedent)
+Expected: 7 passed (3 core tests + 1 error-handling test, added proactively per the Task 5/6 `main()` error-handling precedent, + 3 code-review tests covering overdue routing, marker clearing after `mark_reminded`, and `done`-item omission)
 
 - [ ] **Step 5: Commit**
 

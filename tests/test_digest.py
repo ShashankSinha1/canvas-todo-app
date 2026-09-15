@@ -78,3 +78,49 @@ def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypa
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert "error" in printed
+
+
+def test_build_digest_routes_overdue_graded_item_to_overdue_section_only(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Late Quiz", due_at="2026-09-10T23:59:00Z",
+        status="overdue", canvas_assignment_id=1, created_week="2026-09-07",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "Overdue:" in result["digest_text"]
+    overdue_section = result["digest_text"].split("Overdue:")[1]
+    assert "Late Quiz" in overdue_section
+    due_section_present = "Due this week:" in result["digest_text"]
+    if due_section_present:
+        due_section = result["digest_text"].split("Due this week:")[1].split("Overdue:")[0]
+        assert "Late Quiz" not in due_section
+
+
+def test_new_marker_disappears_after_mark_reminded(conn):
+    item_id, _ = db.upsert_ungraded_item(
+        conn, course_name="CS101", title="Watch Lecture 4", due_at=None, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    first_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" in first_result["digest_text"]
+
+    db.mark_reminded(conn, first_result["reminded_ids"], now.isoformat())
+
+    second_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" not in second_result["digest_text"]
+    assert "Watch Lecture 4" in second_result["digest_text"]
+
+
+def test_build_digest_omits_done_items_and_their_course_header(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Finished Homework", due_at="2026-09-12T23:59:00Z",
+        status="done", canvas_assignment_id=1, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "CS101" not in result["digest_text"]
+    assert "Finished Homework" not in result["digest_text"]
+    assert result["reminded_ids"] == []
