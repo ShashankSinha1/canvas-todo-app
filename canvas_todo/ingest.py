@@ -77,7 +77,7 @@ def main() -> None:
     db.init_db(conn)
     try:
         result = run_ingest(conn)
-    except canvas_client.CanvasAPIError as exc:
+    except Exception as exc:
         print(json.dumps({"error": str(exc)}))
         sys.exit(1)
     print(json.dumps(result))

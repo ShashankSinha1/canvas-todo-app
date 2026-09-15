@@ -912,6 +912,43 @@ def test_run_ingest_upserts_graded_items_and_returns_announcements(
     run_row = conn.execute("SELECT * FROM weekly_runs").fetchone()
     assert run_row is not None
     assert json.loads(run_row["raw_announcement_snapshot"]) == result["announcements"]
+
+
+def test_run_ingest_falls_back_to_unknown_course_for_unrecognized_context_code(conn, sample_courses):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    weird_announcement = [
+        {
+            "context_code": "group_999",
+            "title": "Study Group Reminder",
+            "message": "Don't forget the study group meets Friday.",
+            "posted_at": "2026-09-14T09:00:00Z",
+        }
+    ]
+    with patch("canvas_todo.ingest.canvas_client.get_active_courses", return_value=sample_courses), \
+         patch("canvas_todo.ingest.canvas_client.get_assignments_with_submissions", return_value=[]), \
+         patch("canvas_todo.ingest.canvas_client.get_announcements", return_value=weird_announcement):
+        result = ingest.run_ingest(conn, now=now)
+
+    assert result["announcements"][0]["course_name"] == "Unknown"
+
+
+def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["ingest.py", "--db", db_path])
+
+    def _boom(conn, now=None):
+        raise ValueError("simulated unexpected failure")
+
+    with patch("canvas_todo.ingest.run_ingest", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            ingest.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "simulated unexpected failure"}
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -1001,7 +1038,7 @@ def main() -> None:
     db.init_db(conn)
     try:
         result = run_ingest(conn)
-    except canvas_client.CanvasAPIError as exc:
+    except Exception as exc:
         print(json.dumps({"error": str(exc)}))
         sys.exit(1)
     print(json.dumps(result))
@@ -1014,7 +1051,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_ingest.py -v`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 6: Commit**
 
