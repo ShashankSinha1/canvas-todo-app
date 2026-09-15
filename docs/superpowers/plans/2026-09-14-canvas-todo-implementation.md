@@ -1621,10 +1621,10 @@ Call the `create_scheduled_task` tool with exactly these arguments:
 - `prompt`:
 
 ```
-You are running the daily Canvas weekly check-in for shashank.wmr@gmail.com. Work entirely inside ~/canvas-todo-app. A Python virtualenv already exists at ~/canvas-todo-app/venv; use ~/canvas-todo-app/venv/bin/python for every script invocation below. The SQLite database is at ~/canvas-todo-app/canvas_todo.db. Environment variables (Canvas + Telegram credentials) live in ~/canvas-todo-app/.env and must be loaded in the SAME bash call as each script invocation, since exported variables don't persist between separate tool calls — prefix every command with `set -a && source ~/canvas-todo-app/.env && set +a &&`.
+You are running the daily Canvas weekly check-in for shashank.wmr@gmail.com. Work entirely inside ~/canvas-todo-app. A Python virtualenv already exists at ~/canvas-todo-app/venv; use ~/canvas-todo-app/venv/bin/python for every script invocation below. The SQLite database is at ~/canvas-todo-app/canvas_todo.db. Environment variables (Canvas + Telegram credentials) live in ~/canvas-todo-app/.env and must be loaded in the SAME bash call as each script invocation, since exported variables don't persist between separate tool calls. The `canvas_todo` package is also only importable when the shell's current directory is the project root (running it via `python -m` resolves the package relative to the working directory, not the venv's location) — for both reasons, prefix EVERY command below with `cd ~/canvas-todo-app && set -a && source .env && set +a &&`, never skip the `cd` even if a previous command in the same run already did it, since each tool call may start a fresh shell.
 
 Step 1 — Ingest Canvas data:
-Run: set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.ingest --db ~/canvas-todo-app/canvas_todo.db
+Run: cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.ingest --db canvas_todo.db
 
 This pulls active courses, upserts graded assignment status (submitted/overdue/pending) directly into the database, and prints JSON to stdout shaped like: {"week_of": "YYYY-MM-DD", "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}, ...]}.
 
@@ -1639,16 +1639,16 @@ If you extract zero items, skip Step 3 entirely and go to Step 4.
 
 Step 3 — Save the extracted items:
 Run the following, substituting a valid single-quoted JSON array for ITEMS_JSON containing every object you built in Step 2:
-set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.upsert_ungraded --db ~/canvas-todo-app/canvas_todo.db --items-json 'ITEMS_JSON'
+cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.upsert_ungraded --db canvas_todo.db --items-json 'ITEMS_JSON'
 
 Step 4 — Build the digest:
-Run: set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.digest --db ~/canvas-todo-app/canvas_todo.db
+Run: cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.digest --db canvas_todo.db
 
 This prints JSON shaped like: {"digest_text": "...", "urgent_text": "..." or null}.
 
 Step 5 — Send Telegram message(s):
 Always send one message with the digest_text from Step 4 (or the Canvas-unreachable message from Step 1's failure branch), using:
-set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.telegram_client --message "TEXT_HERE"
+cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.telegram_client --message "TEXT_HERE"
 
 If Step 4's urgent_text is not null, send it as a second, separate call to the same command with the urgent_text as the message.
 
