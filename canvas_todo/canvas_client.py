@@ -12,12 +12,19 @@ class CanvasAPIError(Exception):
 
 
 def _base_url() -> str:
-    url = os.environ["CANVAS_API_URL"].rstrip("/")
-    return f"{url}/api/v1"
+    try:
+        url = os.environ["CANVAS_API_URL"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_URL is not set (check your .env file)") from exc
+    return f"{url.rstrip('/')}/api/v1"
 
 
 def _headers() -> dict:
-    return {"Authorization": f"Bearer {os.environ['CANVAS_API_TOKEN']}"}
+    try:
+        token = os.environ["CANVAS_API_TOKEN"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_TOKEN is not set (check your .env file)") from exc
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _parse_next_link(link_header: str | None) -> str | None:

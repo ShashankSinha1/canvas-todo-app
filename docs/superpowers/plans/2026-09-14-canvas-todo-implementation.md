@@ -621,6 +621,28 @@ def test_get_paginated_follows_next_link(mock_get):
 
 
 @patch("canvas_todo.canvas_client.requests.get")
+def test_get_paginated_handles_realistic_multi_link_header(mock_get):
+    multi_link_header = (
+        '<https://example.instructure.com/api/v1/courses?page=1>; rel="current", '
+        '<https://example.instructure.com/api/v1/courses?page=2>; rel="next", '
+        '<https://example.instructure.com/api/v1/courses?page=5>; rel="last"'
+    )
+    page1 = _fake_response([{"id": 1}], link_header=multi_link_header)
+    page2 = _fake_response([{"id": 2}])  # last page, no Link header
+    mock_get.side_effect = [page1, page2]
+
+    courses = canvas_client.get_active_courses()
+    assert courses == [{"id": 1}, {"id": 2}]
+    assert mock_get.call_count == 2
+
+
+def test_get_active_courses_raises_clear_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("CANVAS_API_TOKEN", raising=False)
+    with pytest.raises(canvas_client.CanvasAPIError, match="CANVAS_API_TOKEN"):
+        canvas_client.get_active_courses()
+
+
+@patch("canvas_todo.canvas_client.requests.get")
 def test_get_active_courses_raises_on_error(mock_get):
     mock_get.return_value = _fake_response({"errors": "bad token"}, status_code=401)
     with pytest.raises(canvas_client.CanvasAPIError):
@@ -665,12 +687,19 @@ class CanvasAPIError(Exception):
 
 
 def _base_url() -> str:
-    url = os.environ["CANVAS_API_URL"].rstrip("/")
-    return f"{url}/api/v1"
+    try:
+        url = os.environ["CANVAS_API_URL"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_URL is not set (check your .env file)") from exc
+    return f"{url.rstrip('/')}/api/v1"
 
 
 def _headers() -> dict:
-    return {"Authorization": f"Bearer {os.environ['CANVAS_API_TOKEN']}"}
+    try:
+        token = os.environ["CANVAS_API_TOKEN"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_TOKEN is not set (check your .env file)") from exc
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _parse_next_link(link_header: str | None) -> str | None:
@@ -731,7 +760,7 @@ def get_announcements(course_ids: list[int], since_days: int = 7) -> list[dict]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_canvas_client.py -v`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
