@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from canvas_todo import db
 from canvas_todo.dateutils import utc_now, week_of
@@ -34,11 +35,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    items = json.loads(args.items_json)
     conn = db.get_connection(args.db)
     db.init_db(conn)
     wk = week_of(utc_now())
-    result = upsert_items(conn, items, wk)
+    try:
+        items = json.loads(args.items_json)
+        result = upsert_items(conn, items, wk)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     print(json.dumps(result))
 
 

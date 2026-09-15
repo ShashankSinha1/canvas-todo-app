@@ -1113,6 +1113,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from canvas_todo import db
 from canvas_todo.dateutils import utc_now, week_of
@@ -1145,11 +1146,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    items = json.loads(args.items_json)
     conn = db.get_connection(args.db)
     db.init_db(conn)
     wk = week_of(utc_now())
-    result = upsert_items(conn, items, wk)
+    try:
+        items = json.loads(args.items_json)
+        result = upsert_items(conn, items, wk)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     print(json.dumps(result))
 
 
@@ -1157,12 +1162,65 @@ if __name__ == "__main__":
     main()
 ```
 
+This CLI's only input (`--items-json`) is populated by an LLM (the Task 11 scheduled agent
+extracting to-do items from Canvas announcement text), which is inherently probabilistic.
+`main()` therefore wraps JSON parsing and the upsert loop in a broad `try/except` so that
+malformed JSON or an item missing a required key (`course_name`/`title`) produces a clean
+`{"error": ...}` JSON line on stdout and exits 1, instead of an uncaught traceback with no
+output — matching the pattern established in Task 5's `ingest.py::main()`.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
 Expected: 1 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add error-handling tests**
+
+Append to `tests/test_upsert_ungraded.py` (requires adding `import json` at the top,
+alongside the existing `sqlite3`, `pytest`, and `upsert_ungraded` imports):
+
+```python
+def test_main_prints_clean_json_error_on_malformed_json(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-json", "not valid json{"]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    bad_items_json = json.dumps([{"course_name": "CS101"}])  # missing "title"
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-json", bad_items_json]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
+Expected: 3 passed
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add canvas_todo/upsert_ungraded.py tests/test_upsert_ungraded.py
