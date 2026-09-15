@@ -133,3 +133,36 @@ def test_get_items_for_week_returns_rows(conn):
     rows = db.get_items_for_week(conn, "2026-09-14")
     assert len(rows) == 1
     assert rows[0]["title"] == "Homework 1"
+
+
+def test_upsert_graded_item_rejects_invalid_status(conn):
+    with pytest.raises(ValueError):
+        db.upsert_graded_item(
+            conn, course_name="CS101", title="Homework 1", due_at="2026-09-18T23:59:00Z",
+            status="bogus", canvas_assignment_id=555, created_week="2026-09-14",
+        )
+
+
+def test_get_items_for_week_includes_unresolved_items_from_prior_weeks(conn):
+    # Overdue item created in a prior week must still show up now (the bug this fix addresses)
+    overdue_id = db.upsert_graded_item(
+        conn, course_name="CS101", title="Late Homework", due_at="2026-09-10T23:59:00Z",
+        status="overdue", canvas_assignment_id=111, created_week="2026-09-07",
+    )
+    # Pending ungraded item created in a prior week, never checked off, must still show up now
+    pending_ungraded_id, _ = db.upsert_ungraded_item(
+        conn, course_name="CS101", title="Watch Lecture 2", due_at=None,
+        created_week="2026-09-07",
+    )
+    # A done item from a prior week should NOT show up in the current week's view
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Old Finished Homework", due_at="2026-09-05T23:59:00Z",
+        status="done", canvas_assignment_id=222, created_week="2026-08-31",
+    )
+
+    rows = db.get_items_for_week(conn, "2026-09-14")
+    ids = {row["id"] for row in rows}
+
+    assert overdue_id in ids
+    assert pending_ungraded_id in ids
+    assert len(rows) == 2

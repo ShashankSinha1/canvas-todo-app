@@ -130,9 +130,9 @@ def toggle_item(conn: sqlite3.Connection, item_id: int) -> str:
 def get_items_for_week(conn: sqlite3.Connection, week_of: str) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT * FROM items
-           WHERE created_week = ? OR (due_at IS NOT NULL AND date(due_at) >= date(?))
+           WHERE created_week = ? OR status != 'done'
            ORDER BY course_name, due_at IS NULL, due_at""",
-        (week_of, week_of),
+        (week_of,),
     ).fetchall()
 
 
