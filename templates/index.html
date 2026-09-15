@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Canvas Weekly To-Do</title>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; }
+    .course { margin-bottom: 1.5rem; }
+    .course h2 { border-bottom: 1px solid #ccc; }
+    .item { padding: 0.25rem 0; }
+    .item.auto-tracked { color: #888; }
+    .item .due { color: #555; font-size: 0.85em; margin-left: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>This Week</h1>
+  {% for course_name, items in by_course.items() %}
+  <div class="course">
+    <h2>{{ course_name }}</h2>
+    {% for item in items %}
+    <div class="item {% if item['auto_tracked'] %}auto-tracked{% endif %}">
+      <input
+        type="checkbox"
+        {% if item['status'] == 'done' %}checked{% endif %}
+        {% if item['auto_tracked'] %}disabled{% endif %}
+        data-item-id="{{ item['id'] }}"
+        onclick="toggleItem({{ item['id'] }})"
+      >
+      <span>{{ item['title'] }}</span>
+      {% if item['due_at'] %}<span class="due">due {{ item['due_at'] }}</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  <script>
+    async function toggleItem(itemId) {
+      const response = await fetch(`/items/${itemId}/toggle`, { method: "POST" });
+      if (!response.ok) {
+        alert("Couldn't update that item.");
+        location.reload();
+      }
+    }
+  </script>
+</body>
+</html>
