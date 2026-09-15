@@ -1516,7 +1516,7 @@ def test_send_message_posts_to_telegram_api(mock_post):
 @patch("canvas_todo.telegram_client.requests.post")
 def test_send_message_raises_on_failure(mock_post):
     mock_post.return_value = MagicMock(status_code=400, text="bad request")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(telegram_client.TelegramError):
         telegram_client.send_message("hello")
 
 
@@ -1526,7 +1526,7 @@ def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
     monkeypatch.setattr(sys_module, "argv", ["telegram_client.py", "--message", "hello"])
 
     def _boom(text):
-        raise RuntimeError("Telegram send failed: 400 bad request")
+        raise telegram_client.TelegramError("Telegram send failed: 400 bad request")
 
     with patch("canvas_todo.telegram_client.send_message", side_effect=_boom):
         with pytest.raises(SystemExit) as exc_info:
@@ -1536,6 +1536,28 @@ def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert printed == {"error": "Telegram send failed: 400 bad request"}
+
+
+def test_send_message_raises_clear_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    with pytest.raises(telegram_client.TelegramError, match="TELEGRAM_BOT_TOKEN"):
+        telegram_client.send_message("hello")
+
+
+def test_send_message_sanitizes_connection_error():
+    import requests as requests_module
+
+    with patch(
+        "canvas_todo.telegram_client.requests.post",
+        side_effect=requests_module.exceptions.ConnectionError(
+            "Max retries exceeded with url: /botREALSECRETTOKEN12345/sendMessage (Caused by ...)"
+        ),
+    ):
+        with pytest.raises(telegram_client.TelegramError) as exc_info:
+            telegram_client.send_message("hello")
+
+    assert "REALSECRETTOKEN12345" not in str(exc_info.value)
+    assert "ConnectionError" in str(exc_info.value)
 ```
 
 Note: this test file needs `import json` added at the top alongside the other imports.
@@ -1560,13 +1582,25 @@ import requests
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
+class TelegramError(Exception):
+    pass
+
+
 def send_message(text: str) -> None:
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    try:
+        bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+        chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    except KeyError as exc:
+        raise TelegramError(f"{exc.args[0]} is not set (check your .env file)") from exc
+
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
-    response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    try:
+        response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        raise TelegramError(f"Telegram request failed: {type(exc).__name__}") from exc
+
     if response.status_code != 200:
-        raise RuntimeError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
+        raise TelegramError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
 
 
 def main() -> None:
@@ -1589,7 +1623,7 @@ Note: `main()` applies the same `try/except Exception` → clean JSON error → 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_telegram_client.py -v`
-Expected: 3 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 

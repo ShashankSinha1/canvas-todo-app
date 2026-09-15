@@ -23,7 +23,7 @@ def test_send_message_posts_to_telegram_api(mock_post):
 @patch("canvas_todo.telegram_client.requests.post")
 def test_send_message_raises_on_failure(mock_post):
     mock_post.return_value = MagicMock(status_code=400, text="bad request")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(telegram_client.TelegramError):
         telegram_client.send_message("hello")
 
 
@@ -33,7 +33,7 @@ def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
     monkeypatch.setattr(sys_module, "argv", ["telegram_client.py", "--message", "hello"])
 
     def _boom(text):
-        raise RuntimeError("Telegram send failed: 400 bad request")
+        raise telegram_client.TelegramError("Telegram send failed: 400 bad request")
 
     with patch("canvas_todo.telegram_client.send_message", side_effect=_boom):
         with pytest.raises(SystemExit) as exc_info:
@@ -43,3 +43,25 @@ def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert printed == {"error": "Telegram send failed: 400 bad request"}
+
+
+def test_send_message_raises_clear_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    with pytest.raises(telegram_client.TelegramError, match="TELEGRAM_BOT_TOKEN"):
+        telegram_client.send_message("hello")
+
+
+def test_send_message_sanitizes_connection_error():
+    import requests as requests_module
+
+    with patch(
+        "canvas_todo.telegram_client.requests.post",
+        side_effect=requests_module.exceptions.ConnectionError(
+            "Max retries exceeded with url: /botREALSECRETTOKEN12345/sendMessage (Caused by ...)"
+        ),
+    ):
+        with pytest.raises(telegram_client.TelegramError) as exc_info:
+            telegram_client.send_message("hello")
+
+    assert "REALSECRETTOKEN12345" not in str(exc_info.value)
+    assert "ConnectionError" in str(exc_info.value)

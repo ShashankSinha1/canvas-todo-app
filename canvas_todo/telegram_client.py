@@ -10,13 +10,25 @@ import requests
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
+class TelegramError(Exception):
+    pass
+
+
 def send_message(text: str) -> None:
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    try:
+        bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+        chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    except KeyError as exc:
+        raise TelegramError(f"{exc.args[0]} is not set (check your .env file)") from exc
+
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
-    response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    try:
+        response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        raise TelegramError(f"Telegram request failed: {type(exc).__name__}") from exc
+
     if response.status_code != 200:
-        raise RuntimeError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
+        raise TelegramError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
 
 
 def main() -> None:
