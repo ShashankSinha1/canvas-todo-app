@@ -569,6 +569,8 @@ git commit -m "feat: add SQLite data layer with graded/ungraded upsert and toggl
 
 ### Task 4: Canvas API Client
 
+> **SUPERSEDED (2026-09-16) — see `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** Georgia Tech blocks student API tokens, and the follow-up session-cookie and token-free-feed approaches were each abandoned in turn (see Amendments 1 and 2). The module built by this task was removed in Task 16 and replaced by manually-triggered Chrome-extension ingestion + `canvas_todo/manual_ingest.py`. Left below as a historical record of what was originally built, reviewed, and later retired — do not re-implement from this section.
+
 **Files:**
 - Create: `canvas_todo/canvas_client.py`
 - Test: `tests/test_canvas_client.py`
@@ -772,6 +774,8 @@ git commit -m "feat: add Canvas REST API client with pagination"
 ---
 
 ### Task 5: Ingestion CLI
+
+> **SUPERSEDED (2026-09-16) — see `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** This module depended on Task 4's retired `canvas_client.py`. Removed in Task 16 and replaced by `canvas_todo/manual_ingest.py`, which persists data Claude reads live via the Chrome extension rather than fetching it itself. Left below as historical record — do not re-implement from this section.
 
 **Files:**
 - Create: `canvas_todo/ingest.py`
@@ -1910,12 +1914,14 @@ git commit -m "docs: add setup and usage README"
 
 ### Task 11: Register the Scheduled Agent
 
+> **NOT EXECUTED — superseded (2026-09-16) by `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** Canvas access is now manually-triggered only (via the Chrome extension in a live conversation) — there is deliberately no scheduled/unattended automation, since that was the specific pattern rejected on security-control-circumvention grounds for the two prior Canvas-access approaches. This task is never executed. See Task 16 for what replaced it.
+
 This step registers the daily automation using this platform's built-in scheduled-task tool. It must run **after** Tasks 1–10 are complete (the prompt below assumes the venv, `.env`, and all CLI modules already exist and work).
 
 - [ ] **Step 1: Confirm prerequisites**
 
-Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env ~/canvas-todo-app/canvas_session_profile`
-Expected: all three paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in real values before proceeding. If `canvas_session_profile/` doesn't exist yet, run `cd ~/canvas-todo-app && venv/bin/python -m canvas_todo.canvas_login_setup` and complete the interactive Canvas login first (see Tasks 12-15 below and the README) — the scheduled agent will fail every run without a saved session.
+Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env ~/canvas-todo-app/courses.json`
+Expected: all three paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in your Canvas Calendar Feed URL and Telegram credentials. If `courses.json` doesn't exist yet, create it listing each active course's name and Announcements feed URL (see the README and Task 12 below) — the scheduled agent will fail every run without both.
 
 - [ ] **Step 2: Call `create_scheduled_task`**
 
@@ -1983,10 +1989,377 @@ git commit -m "docs: note scheduled task registration"
 
 ---
 
+## Amendment 2 (2026-09-16): Manually-Triggered Ingestion via Chrome Extension
+
+Supersedes Tasks 4, 5, and 11 above (left in place as historical record, each marked SUPERSEDED/NOT EXECUTED). See `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2," for full rationale: Georgia Tech blocks student API tokens; a session-cookie approach and a token-free-feed approach were each considered and abandoned; the resolution is that Claude reads Canvas live via the Chrome extension **only when the user actively asks in conversation**, never on an unattended schedule.
+
+### Task 16: Retire REST Canvas Client, Add Manual Ingestion CLI
+
+**Files:**
+- Delete: `canvas_todo/canvas_client.py`
+- Delete: `canvas_todo/ingest.py`
+- Delete: `tests/test_canvas_client.py`
+- Delete: `tests/test_ingest.py`
+- Delete: `tests/fixtures/sample_courses.json`
+- Delete: `tests/fixtures/sample_assignments.json`
+- Delete: `tests/fixtures/sample_announcements.json`
+- Create: `canvas_todo/manual_ingest.py`
+- Test: `tests/test_manual_ingest.py`
+- Modify: `.env.template`
+- Modify: `README.md`
+
+- [ ] **Step 1: Delete the retired REST-API modules and their tests/fixtures**
+
+```bash
+git rm canvas_todo/canvas_client.py canvas_todo/ingest.py tests/test_canvas_client.py tests/test_ingest.py
+git rm -r tests/fixtures
+```
+
+- [ ] **Step 2: Run the full suite to confirm nothing else depends on the removed modules**
+
+Run: `venv/bin/pytest -q`
+Expected: passes with a reduced count (removing ~20 tests between the two deleted test files — confirm the actual number rather than assuming), zero import errors from any remaining module.
+
+- [ ] **Step 3: Write the failing tests**
+
+`tests/test_manual_ingest.py`:
+
+```python
+import json
+import sqlite3
+from datetime import datetime, timezone
+
+import pytest
+
+from canvas_todo import db, manual_ingest
+
+
+def test_compute_status_submitted_is_done():
+    assignment = {"submitted": True, "due_at": "2026-09-18T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "done"
+
+
+def test_compute_status_overdue_when_unsubmitted_past_due():
+    assignment = {"submitted": False, "due_at": "2026-09-10T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "overdue"
+
+
+def test_compute_status_pending_when_unsubmitted_and_upcoming():
+    assignment = {"submitted": False, "due_at": "2026-09-20T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "pending"
+
+
+def test_compute_status_pending_when_no_due_date():
+    assignment = {"submitted": False, "due_at": None}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "pending"
+
+
+@pytest.fixture
+def conn():
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    db.init_db(connection)
+    yield connection
+    connection.close()
+
+
+def test_run_manual_ingest_upserts_graded_items_and_records_announcements(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [
+            {
+                "course_name": "CS101",
+                "assignments": [
+                    {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+                    {"canvas_assignment_id": 2, "title": "Quiz 2", "due_at": "2026-09-10T23:59:00Z", "submitted": False},
+                    {"canvas_assignment_id": 3, "title": "Project Proposal", "due_at": "2026-09-15T23:59:00Z", "submitted": True},
+                ],
+            }
+        ],
+        "announcements": [
+            {"course_name": "CS101", "title": "Week 5", "message": "Watch Lecture 4", "posted_at": "2026-09-14T09:00:00Z"}
+        ],
+    }
+
+    result = manual_ingest.run_manual_ingest(conn, data, now=now)
+
+    rows = conn.execute("SELECT * FROM items WHERE type = 'graded'").fetchall()
+    assert len(rows) == 3
+    statuses = {row["title"]: row["status"] for row in rows}
+    assert statuses["Homework 1"] == "pending"
+    assert statuses["Quiz 2"] == "overdue"
+    assert statuses["Project Proposal"] == "done"
+
+    assert result["week_of"] == "2026-09-14"
+    assert result["announcements"] == data["announcements"]
+
+    run_row = conn.execute("SELECT * FROM weekly_runs").fetchone()
+    assert run_row is not None
+    assert json.loads(run_row["raw_announcement_snapshot"]) == data["announcements"]
+
+
+def test_run_manual_ingest_skips_assignments_without_due_date(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [
+            {
+                "course_name": "CS101",
+                "assignments": [
+                    {"canvas_assignment_id": 1, "title": "Undated Assignment", "due_at": None, "submitted": False},
+                ],
+            }
+        ],
+        "announcements": [],
+    }
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+    rows = conn.execute("SELECT * FROM items").fetchall()
+    assert len(rows) == 0
+
+
+def test_run_manual_ingest_re_upserts_existing_assignment_by_id(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+    data["courses"][0]["assignments"][0]["submitted"] = True
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+
+    rows = conn.execute("SELECT * FROM items").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "done"
+
+
+def test_main_prints_clean_json_error_on_malformed_input(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", "not valid json{"]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_upserts_and_prints_result(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", json.dumps(data)]
+    )
+    manual_ingest.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "week_of" in printed
+```
+
+- [ ] **Step 4: Run tests to verify they fail**
+
+Run: `venv/bin/pytest tests/test_manual_ingest.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'canvas_todo.manual_ingest'`
+
+- [ ] **Step 5: Implement `canvas_todo/manual_ingest.py`**
+
+```python
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime
+
+from canvas_todo import db
+from canvas_todo.dateutils import utc_now, week_of
+
+
+def compute_status(assignment: dict, now: datetime) -> str:
+    if assignment.get("submitted"):
+        return "done"
+    due_at = assignment.get("due_at")
+    if due_at:
+        due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        if due_dt < now:
+            return "overdue"
+    return "pending"
+
+
+def run_manual_ingest(conn, data: dict, now: datetime | None = None) -> dict:
+    now = now or utc_now()
+    wk = week_of(now)
+
+    for course in data.get("courses", []):
+        course_name = course["course_name"]
+        for assignment in course.get("assignments", []):
+            due_at = assignment.get("due_at")
+            if due_at is None:
+                continue  # undated assignments aren't part of a "this week" view
+            db.upsert_graded_item(
+                conn,
+                course_name=course_name,
+                title=assignment["title"],
+                due_at=due_at,
+                status=compute_status(assignment, now),
+                canvas_assignment_id=assignment["canvas_assignment_id"],
+                created_week=wk,
+            )
+
+    announcements = data.get("announcements", [])
+    db.insert_weekly_run(
+        conn,
+        run_at=now.isoformat(),
+        week_of=wk,
+        raw_announcement_snapshot=json.dumps(announcements),
+    )
+    return {"week_of": wk, "announcements": announcements}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Persist Canvas data Claude read live via the Chrome extension"
+    )
+    parser.add_argument("--db", required=True, help="Path to SQLite database file")
+    parser.add_argument(
+        "--data-json",
+        required=True,
+        help='JSON object: {"courses": [{"course_name": ..., "assignments": [{"canvas_assignment_id": ..., "title": ..., "due_at": ..., "submitted": ...}]}], "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}]}',
+    )
+    args = parser.parse_args()
+
+    conn = db.get_connection(args.db)
+    db.init_db(conn)
+    try:
+        data = json.loads(args.data_json)
+        result = run_manual_ingest(conn, data)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Note this module has NO dependency on `canvas_client.py` (deleted in Step 1) — it only depends on `db.py` and `dateutils.py`, both unchanged from Tasks 2-3. `compute_status` is intentionally similar to the old `ingest.py`'s version but reads a flat `submitted: bool` field instead of a nested `submission.submitted_at` structure, since Claude reports what it directly observes on the Canvas UI (a "Submitted"/"Not Submitted" indicator) rather than a raw API payload shape.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `venv/bin/pytest tests/test_manual_ingest.py -v`
+Expected: 9 passed
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `venv/bin/pytest -q`
+Expected: all tests pass, no import errors, no leftover references to the deleted modules anywhere in the test suite.
+
+- [ ] **Step 8: Update `.env.template`**
+
+Replace the "Canvas API" section (which previously had `CANVAS_API_URL`/`CANVAS_API_TOKEN`) — remove it entirely, since no Canvas credentials of any kind are needed anymore. New contents:
+
+```
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+
+# App
+CANVAS_TODO_DB=canvas_todo.db
+```
+
+- [ ] **Step 9: Rewrite the relevant `README.md` sections**
+
+Replace the "One-time setup" step 1 (Canvas API token) and the entire "Scheduled daily agent" section. New content for "One-time setup":
+
+```markdown
+## One-time setup
+
+1. **Canvas access**: none needed! This app doesn't use a Canvas API token,
+   login, or session — Georgia Tech blocks student-generated tokens, so
+   instead you ask Claude (with the Chrome extension connected) to read
+   Canvas live through your own already-logged-in browser tab. See "Checking
+   your Canvas" below.
+2. **Telegram bot**:
+   - Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`,
+     follow the prompts. You'll get a bot token.
+   - Send any message to your new bot, then visit
+     `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser —
+     your `chat.id` is in the JSON response. That's your `TELEGRAM_CHAT_ID`.
+3. Copy `.env.template` to `.env` and fill in both Telegram values plus
+   `CANVAS_TODO_DB` (default `canvas_todo.db` is fine).
+4. Install dependencies:
+   ```bash
+   python3 -m venv venv
+   venv/bin/pip install -r requirements.txt
+   ```
+5. Run the test suite to confirm everything's wired up:
+   ```bash
+   venv/bin/pytest
+   ```
+```
+
+Replace "Running the daily check manually (without waiting for the schedule)" and "Scheduled daily agent" with:
+
+```markdown
+## Checking your Canvas
+
+There is no automatic daily check — ask Claude directly, in an active
+conversation, something like "check my Canvas" or "what's due this week."
+Claude uses the Chrome extension to read your courses, assignments, and
+announcements from your already-logged-in Canvas tab, then:
+
+1. Calls `canvas_todo.manual_ingest` to save graded-assignment status into
+   the database.
+2. Reads announcement text and calls `canvas_todo.upsert_ungraded` for any
+   ungraded to-dos it finds (readings, lectures to watch, etc.).
+3. Calls `canvas_todo.digest` to build a summary and `canvas_todo.telegram_client`
+   to send it to you.
+
+This is deliberately not automated — see the design spec's "Amendment 2"
+for why (Georgia Tech blocks the kind of unattended automated access this
+would otherwise require).
+```
+
+- [ ] **Step 10: Update the "Known limitations" section**
+
+Replace the existing bullet about "No EdStem..." list to also note:
+
+```markdown
+- No automatic/scheduled checks — you must ask Claude to check Canvas each
+  time; nothing runs in the background. This is a deliberate tradeoff, not
+  a bug (see design spec Amendment 2).
+```
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add canvas_todo/manual_ingest.py tests/test_manual_ingest.py .env.template README.md
+git commit -m "feat: replace REST/token Canvas access with manually-triggered Chrome-extension ingestion"
+```
+
+---
+
 ## Definition of Done
 
 - [ ] `venv/bin/pytest` passes with 0 failures across all test files.
-- [ ] `venv/bin/python -m canvas_todo.web` serves a page at `localhost:5000` showing at least one real course after running `ingest` once with real credentials.
-- [ ] A manually-triggered run of `ingest` → `digest` → `telegram_client` results in a real Telegram message arriving.
-- [ ] `canvas-weekly-checkin` appears in `list_scheduled_tasks`, enabled, scheduled for 7:30am daily.
-- [ ] Toggling an ungraded item's checkbox in the web app persists across a page reload; toggling a graded item's (disabled) checkbox does nothing.
+- [ ] `venv/bin/python -m canvas_todo.web` serves a page at `localhost:5000` showing at least one real course after a manual Canvas check has been run once.
+- [ ] Asking Claude to "check my Canvas" in a live conversation results in `manual_ingest` → (optionally `upsert_ungraded`) → `digest` → `telegram_client` running in sequence and a real Telegram message arriving.
+- [ ] No scheduled task is registered for this project — confirm `list_scheduled_tasks` does not include `canvas-weekly-checkin` (or any Canvas-related task).
+- [ ] Toggling any item's checkbox in the web app (graded or ungraded — both are user-toggled now) persists across a page reload.
+- [ ] No file in the repository references `CANVAS_API_TOKEN`, `CANVAS_API_URL`, `canvas_session_profile`, or `courses.json` (grep to confirm) — all now-inapplicable artifacts from the abandoned approaches are fully removed.
