@@ -55,17 +55,27 @@ def main() -> None:
         description="Persist Canvas data Claude read live via the Chrome extension"
     )
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--data-json",
-        required=True,
-        help='JSON object: {"courses": [{"course_name": ..., "assignments": [{"canvas_assignment_id": ..., "title": ..., "due_at": ..., "submitted": ...}]}], "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}]}',
+        help="JSON object inline (only safe for data with no quotes/apostrophes — prefer --data-file)",
+    )
+    group.add_argument(
+        "--data-file",
+        help="Path to a file containing the JSON object (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement text and course/assignment titles)",
     )
     args = parser.parse_args()
 
     conn = db.get_connection(args.db)
     db.init_db(conn)
     try:
-        data = json.loads(args.data_json)
+        if args.data_file:
+            with open(args.data_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.data_json
+        data = json.loads(raw)
         result = run_manual_ingest(conn, data)
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))

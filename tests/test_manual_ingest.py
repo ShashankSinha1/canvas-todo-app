@@ -142,3 +142,53 @@ def test_main_upserts_and_prints_result(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert "week_of" in printed
+
+
+def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    # Missing "course_name" — a structurally required field
+    data = {"courses": [{"assignments": [
+        {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False}
+    ]}]}
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", json.dumps(data)]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_reads_from_data_file(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    data_file = tmp_path / "canvas_data.json"
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    data_file.write_text(json.dumps(data))
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-file", str(data_file)]
+    )
+    manual_ingest.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "week_of" in printed
+
+
+def test_main_requires_exactly_one_of_data_json_or_data_file(tmp_path, monkeypatch):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["manual_ingest.py", "--db", db_path])
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 2  # argparse's own exit code for a usage error

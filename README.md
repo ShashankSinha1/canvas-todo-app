@@ -46,7 +46,9 @@ Claude uses the Chrome extension to read your courses, assignments, and
 announcements from your already-logged-in Canvas tab, then:
 
 1. Calls `canvas_todo.manual_ingest` to save graded-assignment status into
-   the database.
+   the database. To avoid shell-quoting issues with apostrophes/quotes in
+   real course and announcement text, Claude writes the JSON to a temp file
+   and passes it with `--data-file` rather than inlining it with `--data-json`.
 2. Reads announcement text and calls `canvas_todo.upsert_ungraded` for any
    ungraded to-dos it finds (readings, lectures to watch, etc.).
 3. Calls `canvas_todo.digest` to build a summary and `canvas_todo.telegram_client`

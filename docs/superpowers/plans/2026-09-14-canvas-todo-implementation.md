@@ -2169,7 +2169,65 @@ def test_main_upserts_and_prints_result(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert "week_of" in printed
+
+
+def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    # Missing "course_name" — a structurally required field
+    data = {"courses": [{"assignments": [
+        {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False}
+    ]}]}
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", json.dumps(data)]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_reads_from_data_file(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    data_file = tmp_path / "canvas_data.json"
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    data_file.write_text(json.dumps(data))
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-file", str(data_file)]
+    )
+    manual_ingest.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "week_of" in printed
+
+
+def test_main_requires_exactly_one_of_data_json_or_data_file(tmp_path, monkeypatch):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["manual_ingest.py", "--db", db_path])
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 2  # argparse's own exit code for a usage error
 ```
+
+Note: the three additional tests above (`test_main_prints_clean_json_error_on_missing_required_key`,
+`test_main_reads_from_data_file`, and `test_main_requires_exactly_one_of_data_json_or_data_file`) were
+added during code review to close gaps flagged as an "Important" reliability risk: real Canvas
+announcement/title text routinely contains apostrophes and quotes, which corrupts or truncates
+`--data-json` when it's embedded in a shell command string. `--data-file` (Step 5) lets Claude write
+the JSON to a temp file via a file-writing tool — no shell interpretation involved — and pass just the
+path, eliminating the risk entirely.
 
 - [ ] **Step 4: Run tests to verify they fail**
 
@@ -2236,17 +2294,27 @@ def main() -> None:
         description="Persist Canvas data Claude read live via the Chrome extension"
     )
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--data-json",
-        required=True,
-        help='JSON object: {"courses": [{"course_name": ..., "assignments": [{"canvas_assignment_id": ..., "title": ..., "due_at": ..., "submitted": ...}]}], "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}]}',
+        help="JSON object inline (only safe for data with no quotes/apostrophes — prefer --data-file)",
+    )
+    group.add_argument(
+        "--data-file",
+        help="Path to a file containing the JSON object (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement text and course/assignment titles)",
     )
     args = parser.parse_args()
 
     conn = db.get_connection(args.db)
     db.init_db(conn)
     try:
-        data = json.loads(args.data_json)
+        if args.data_file:
+            with open(args.data_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.data_json
+        data = json.loads(raw)
         result = run_manual_ingest(conn, data)
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
@@ -2260,10 +2328,17 @@ if __name__ == "__main__":
 
 Note this module has NO dependency on `canvas_client.py` (deleted in Step 1) — it only depends on `db.py` and `dateutils.py`, both unchanged from Tasks 2-3. `compute_status` is intentionally similar to the old `ingest.py`'s version but reads a flat `submitted: bool` field instead of a nested `submission.submitted_at` structure, since Claude reports what it directly observes on the Canvas UI (a "Submitted"/"Not Submitted" indicator) rather than a raw API payload shape.
 
+`--data-json` and `--data-file` are a required mutually-exclusive group: argparse itself enforces
+exactly one of the two (exit code 2 with a usage message if neither or both are given), so `main()`
+doesn't need to handle that case manually. Reading `--data-file` happens inside the same
+`try/except Exception` block as JSON parsing, so a missing/unreadable file produces the same clean
+`{"error": ...}` + exit 1 as any other failure mode.
+
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_manual_ingest.py -v`
-Expected: 9 passed
+Expected: 12 passed (9 original + 3 code-review tests covering the missing-required-key error path,
+the new `--data-file` path end-to-end, and argparse's mutual-exclusion enforcement)
 
 - [ ] **Step 7: Run the full suite**
 
@@ -2325,7 +2400,9 @@ Claude uses the Chrome extension to read your courses, assignments, and
 announcements from your already-logged-in Canvas tab, then:
 
 1. Calls `canvas_todo.manual_ingest` to save graded-assignment status into
-   the database.
+   the database. To avoid shell-quoting issues with apostrophes/quotes in
+   real course and announcement text, Claude writes the JSON to a temp file
+   and passes it with `--data-file` rather than inlining it with `--data-json`.
 2. Reads announcement text and calls `canvas_todo.upsert_ungraded` for any
    ungraded to-dos it finds (readings, lectures to watch, etc.).
 3. Calls `canvas_todo.digest` to build a summary and `canvas_todo.telegram_client`
