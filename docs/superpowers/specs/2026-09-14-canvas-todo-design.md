@@ -6,6 +6,8 @@
 
 ## Purpose
 
+*(See "Amendment 2" below — the automation model changed from proactive/scheduled to manually-triggered. This section describes the original intent; treat Amendment 2 as authoritative for what's actually built.)*
+
 A personal Canvas assistant that: (1) shows a weekly view of everything due — graded assignments and ungraded lecture/reading catch-up items inferred from Canvas announcements; (2) sends Telegram reminders proactively so the user doesn't have to remember to check; (3) automatically checks off graded assignments the moment they're submitted on Canvas, so manual bookkeeping is limited to the items Canvas genuinely cannot verify on its own.
 
 This is an explicit POC for a single user (shashank.wmr@gmail.com). Deployment, multi-user support, and hosting hardening are out of scope for this iteration but the design avoids choices that would make them harder later.
@@ -78,15 +80,18 @@ This step is inherently probabilistic. Precision is not a target for the POC —
 
 ## Setup & Credentials Required
 
-1. Canvas API token (Canvas → Account → Settings → New Access Token) + Canvas instance base URL.
-2. Telegram bot token (via @BotFather) + chat ID (captured once bot exists).
-3. canvas-mcp installed and configured locally for ad hoc/on-demand queries via Claude ("what's due this week") — separate from the scheduled agent's direct-REST-API ingestion path, which doesn't route through the MCP layer.
+*(Updated 2026-09-16 — see Amendment above; this supersedes the original token-based list.)*
 
-All secrets in a local `.env`, gitignored, never hardcoded.
+1. **Canvas Calendar Feed URL** (Account → Settings → "Calendar Feed") — one-time copy into `.env`.
+2. **Per-course Announcements Feed URLs** — one per active course, found on each course's Announcements page; collected into a gitignored `courses.json` config file. Must be refreshed each semester when enrolled courses change.
+3. Telegram bot token (via @BotFather) + chat ID (captured once bot exists).
+4. canvas-mcp installed and configured locally for ad hoc/on-demand queries via Claude ("what's due this week") — this path is independent of the scheduled agent's feed-based ingestion and unaffected by this amendment.
+
+All secrets/feed URLs in local, gitignored files (`.env`, `courses.json`), never hardcoded, never committed.
 
 ## Error Handling & Edge Cases
 
-- **Canvas API failure**: run logs the error, does not update `items` for that run, and still sends a Telegram message noting Canvas was unreachable rather than going silent or sending stale data as if current.
+- **Canvas feed fetch failure** (network error, feed URL revoked/regenerated, unexpected format): run logs the error, does not update `items` for that run, and still sends a Telegram message noting Canvas was unreachable rather than going silent or sending stale data as if current.
 - **LLM misreads an announcement**: worst case is a spurious/missed to-do item, recoverable via the web app; `raw_announcement_snapshot` provides an audit trail.
 - **Claude Code app closed at scheduled run time**: run fires on next app launch instead (platform behavior, not fixable at this layer) — digest may arrive late.
 - **Duplicate Telegram sends**: prevented by the `last_reminded_at`-driven upsert logic, not by time-based dedup — a manual re-run of the agent does not double-send.
@@ -99,24 +104,43 @@ Pragmatic, not exhaustive, given POC/single-user scope:
 - Integration tests for the Flask toggle endpoint against a temp SQLite file (toggle persists; graded items reject toggle).
 - Telegram sending and LLM announcement-parsing are verified manually (external API / non-deterministic reasoning), consistent with the accepted precision tradeoff above. No CI pipeline for this iteration.
 
-## Amendment (2026-09-16): Canvas Auth Pivot — Session Cookie via Persistent Browser Profile
+## Amendment (2026-09-16): Canvas Auth Pivot — Token-Free Public Feeds
 
 **Problem discovered during implementation:** Georgia Tech (the user's institution) disables student-generated Canvas API access tokens as institutional policy — this is not a bug or a missing setting, it's a deliberate FERPA/security-driven restriction confirmed across multiple peer institutions (GT, UW-Madison, UW, Texas A&M). The original design's assumption of a long-lived `CANVAS_API_TOKEN` (Bearer auth) is not viable for this user.
 
-**Options considered:** (1) request token access via GT's help desk — untried/uncertain turnaround; (2) fall back to token-free public feeds (iCal for due dates, RSS for announcements) — rejected because it loses submission-status data entirely, eliminating auto-checkoff for graded work, the single most-wanted feature; (3) pause the project; (4) authenticate via a real, persistent, cookie-based browser session instead of a token — **chosen**.
+**Options considered:** (1) request token access via GT's help desk — untried/uncertain turnaround, not pursued; (2) fall back to token-free public feeds (iCal for due dates, Atom for announcements) — **chosen**; (3) pause the project; (4) authenticate via a persistent, cookie-based browser session harvested from an interactive login — **attempted, then abandoned**. Option 4 got as far as a drafted implementation plan before the platform's own safety review flagged it as circumventing GT's deliberate institutional access control (harvesting and persisting a live authenticated session specifically to enable the unattended automated access GT chose to block via tokens) rather than a personal risk tradeoff the user could authorize alone. That implementation was never committed; this amendment supersedes it.
 
-**Decision:** Replace Bearer-token auth with session-cookie auth sourced from a **persistent Playwright browser profile**:
+**Decision:** Replace all Canvas REST API access (courses, assignments+submissions, announcements) with two **officially-documented, publicly-supported Canvas feed features**, neither of which requires a token, login, or session of any kind — the feed URL itself, once obtained, is a Canvas-issued, revocable, scoped credential (analogous to a signed link), not something being reverse-engineered or bypassed:
 
-- **One-time (and occasional re-run) manual setup**: the user runs a new interactive script (`canvas_todo/canvas_login_setup.py`) that opens a real, visible Chromium window via Playwright. The user logs into Canvas themselves — typing their GT password and completing Duo 2FA directly in that browser window; this script never sees or handles the password. On success, Playwright's persistent profile (cookies, local storage) is saved to disk at a fixed, gitignored path.
-- **Daily ingestion**: `canvas_client.py` loads cookies from that persistent profile into a `requests.Session` and calls the same public Canvas REST API endpoints as before — no change to which endpoints are called or how pagination/response parsing works, only how the request is authenticated.
-- **Session expiry is expected, not exceptional**: unlike an API token, this session will eventually expire (exact GT-specific duration unknown — dependent on Duo/SSO "remember this device" configuration, which is admin-set and undocumented for GT). When ingestion detects an expired/invalid session (HTTP 401, or a redirect to a login/SSO page instead of a JSON API response), it must raise a distinguishable error so the scheduled agent can send a specific "please log in again" Telegram alert rather than a generic failure message — the user should never have to notice via silence that something broke.
+- **Calendar Feed** (iCal/ICS) — a per-user URL of the form `https://<instance>/feeds/calendars/user_<token>.ics`, found in Canvas under Account → Settings → "Calendar Feed." Aggregates due dates for all courses. Canvas explicitly designs this for external calendar-app syndication; a public open-source tool (`canvas-planner`) already uses this exact pattern for the same purpose (a token-free Canvas due-date tracker).
+- **Per-course Announcements Feed** (Atom) — a URL of the form `https://<instance>/feeds/announcements/course_<id>_<token>.atom`, found via an RSS icon/link on each course's Announcements page. One URL per active course. Also independently validated by an existing open-source tool (`canvas-announcements-to-discord-template`) polling exactly these feeds on a schedule.
 
-**Accepted risks, explicitly surfaced to and approved by the user:**
-- A live session cookie is at least as sensitive as a password/token — arguably more directly so, since it *is* an active authenticated session. It is stored only in the local, gitignored Playwright profile directory, never committed, never logged.
-- This access pattern (automated use of a personal browser session against Canvas) is not an officially sanctioned integration path the way a Developer Key/OAuth flow would be — it sits in a gray area relative to Canvas's terms, mitigated by being read-only, single-user, and never sharing/redistributing the session.
-- "Persistent" is relative: this is expected to survive materially longer than a single manually-copied cookie snapshot (which could die same-day), but will still eventually require the user to re-run the login script — cadence unknown, could be days to weeks.
+**What this costs, explicitly accepted by the user:**
+- **No submission status, ever** — meaning **no auto-checkoff for graded assignments**. This eliminates one of the app's three original core promises. Graded assignment items now behave exactly like ungraded items: they appear on the list with a real, live checkbox, and the user manually checks them off. The `auto_tracked` distinction in the data model is retired — every item the app tracks is now user-toggled.
+- **No course discovery API** — without `/courses`, the app cannot enumerate the user's active courses on its own. The user must manually collect each active course's Announcements feed URL (and course display name) into a small local config file once per semester, when their course list changes. This is a low-frequency manual step, not an ongoing maintenance burden like the abandoned session-refresh approach would have been.
+- **Feed URLs are still secrets** — Canvas explicitly warns these act like a password for the underlying content. They're stored only in local, gitignored config (the calendar URL in `.env`, course announcement URLs in a gitignored `courses.json`), never committed, never logged.
 
-**New dependency:** Playwright (plus a downloaded Chromium binary via `playwright install chromium`) — a materially heavier addition than the project's prior pure-`requests` stack. Accepted as a necessary cost for this user's institutional constraint.
+**What this preserves:** the daily Telegram digest/urgent-alert cadence, the LLM-driven announcement-to-to-do extraction, the local web app, and the SQLite data layer are all unchanged in spirit — only the ingestion source and the graded-item toggle behavior change. No new heavyweight dependency (no browser automation): parsing these feeds needs only the lightweight `icalendar` and `feedparser` libraries.
+
+## Amendment 2 (2026-09-16): Manually-Triggered Ingestion via Chrome Extension — Supersedes Amendment 1
+
+**This is the current, authoritative architecture.** Amendment 1 (token-free feeds) is superseded before implementation — while researching its announcement-feed piece, the user proposed an alternative: since they have the Claude-in-Chrome browser extension and keep Chrome running, Claude could read Canvas live through an already-authenticated browser tab instead of using feeds or tokens at all.
+
+**Why this is different from the abandoned session-cookie approach (Amendment 1's option 4):** that approach was rejected for building an *unattended, scheduled* mechanism — harvesting and persisting a live session specifically so automated access could happen without the user present, recreating the exact capability GT's token policy blocks. The same concern was raised again here (the user's first proposal was to keep Chrome open and have the daily cron drive it, which has the identical shape) and rejected on the same grounds. **The resolution: ingestion is user-triggered only, never scheduled.** When the user is actively present, asking Claude in a live conversation to check Canvas, browsing their own already-logged-in session is materially the same as any other assistive use of the browser extension — not an automated background-access mechanism. This is the load-bearing distinction; it is why this design is acceptable where the two prior approaches were not.
+
+**What changes from the original design:**
+
+- **No scheduled task at all.** The `~/.claude/scheduled-tasks/` cron registration (originally Task 11) is dropped entirely. There is no daily-7:30am automation.
+- **Trigger:** the user, in an active conversation, asks Claude to check Canvas (e.g., "check my Canvas" / "what's due this week"). Claude uses the Chrome extension to navigate the user's courses, assignments, and announcements pages (already authenticated via the user's normal browser login — Claude never handles credentials).
+- **Ingestion becomes a persistence step, not a fetch step:** Claude compiles what it reads into structured JSON (courses, assignments with due dates and submission status, recent announcement text) and hands it to a new CLI, `canvas_todo/manual_ingest.py`, which upserts into the same `items`/`weekly_runs` tables via the existing, unchanged `db.py` functions.
+- **Submission status is back.** Because Claude is reading the live, authenticated Canvas UI (the same thing a token or session would show), real submission status is available again — **auto-checkoff for graded assignments is restored**, reversing Amendment 1's biggest cost. The `auto_tracked` distinction in the data model stays exactly as originally designed (Data Model section above) — no schema change needed.
+- **Announcement-to-to-do extraction is unchanged in spirit** — Claude reads announcement text directly from the page (instead of a fetched feed) and applies the same extraction judgment described in "Canvas Ingestion & Announcement Parsing" above, then calls the existing `upsert_ungraded.py`.
+- **Digest and Telegram delivery are unchanged** — after `manual_ingest.py` runs, `digest.py` and `telegram_client.py` run exactly as originally built, so the user still gets a Telegram message and can still check the web app; they just now happen on-demand rather than every morning automatically.
+- **`canvas_client.py` and the original `ingest.py` are retired** — no REST API, no feed parsing, no token, no session, no Playwright, no `icalendar`/`feedparser` dependency. This is a net simplification relative to both prior approaches.
+
+**What this costs, explicitly accepted by the user:** the app is no longer proactive. Nothing happens unless the user remembers to ask — which is the exact problem ("I keep falling behind... I don't want to check things off myself") the project originally set out to solve. This is a real, acknowledged regression from the original vision, traded for staying clearly on the right side of GT's access-control policy. The user may partially mitigate this by simply getting in the habit of asking each morning, but the app itself cannot enforce that habit anymore.
+
+**Setup, updated:** no Canvas credentials of any kind are needed — no token, no calendar feed URL, no `courses.json`, no login script. Only the Telegram bot token/chat ID (unchanged) and the Chrome extension being connected. This meaningfully simplifies onboarding versus both prior approaches.
 
 ## Future Enhancements (Explicitly Deferred)
 
