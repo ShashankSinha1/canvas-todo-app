@@ -6,15 +6,18 @@ with daily Telegram reminders.
 
 ## One-time setup
 
-1. **Canvas API token**: Canvas → Account → Settings → "New Access Token".
-   Also note your Canvas instance base URL (e.g. `https://illinois.instructure.com`).
+1. **Canvas access**: none needed! This app doesn't use a Canvas API token,
+   login, or session — Georgia Tech blocks student-generated tokens, so
+   instead you ask Claude (with the Chrome extension connected) to read
+   Canvas live through your own already-logged-in browser tab. See "Checking
+   your Canvas" below.
 2. **Telegram bot**:
    - Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`,
      follow the prompts. You'll get a bot token.
    - Send any message to your new bot, then visit
      `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser —
      your `chat.id` is in the JSON response. That's your `TELEGRAM_CHAT_ID`.
-3. Copy `.env.template` to `.env` and fill in all four values plus
+3. Copy `.env.template` to `.env` and fill in both Telegram values plus
    `CANVAS_TODO_DB` (default `canvas_todo.db` is fine).
 4. Install dependencies:
    ```bash
@@ -35,25 +38,23 @@ venv/bin/python -m canvas_todo.web
 
 Open `http://localhost:5000`.
 
-## Running the daily check manually (without waiting for the schedule)
+## Checking your Canvas
 
-```bash
-set -a && source .env && set +a
-venv/bin/python -m canvas_todo.ingest --db canvas_todo.db
-```
+There is no automatic daily check — ask Claude directly, in an active
+conversation, something like "check my Canvas" or "what's due this week."
+Claude uses the Chrome extension to read your courses, assignments, and
+announcements from your already-logged-in Canvas tab, then:
 
-This prints JSON with the week's announcements. The scheduled Claude agent
-(see below) reads that output, decides which announcements describe concrete
-ungraded to-dos, and calls `upsert_ungraded`, `digest`, and `telegram_client`
-in turn. Running `ingest` alone will not send a Telegram message or extract
-ungraded items — it only updates graded-assignment status from Canvas.
+1. Calls `canvas_todo.manual_ingest` to save graded-assignment status into
+   the database.
+2. Reads announcement text and calls `canvas_todo.upsert_ungraded` for any
+   ungraded to-dos it finds (readings, lectures to watch, etc.).
+3. Calls `canvas_todo.digest` to build a summary and `canvas_todo.telegram_client`
+   to send it to you.
 
-## Scheduled daily agent
-
-Registered via this platform's scheduled-task feature (see
-`docs/superpowers/plans/2026-09-14-canvas-todo-implementation.md`, Task 11,
-for the exact registration call and prompt). Runs once daily while the
-Claude Code app is open; if closed at run time, it fires on next launch.
+This is deliberately not automated — see the design spec's "Amendment 2"
+for why (Georgia Tech blocks the kind of unattended automated access this
+would otherwise require).
 
 ## Known limitations (accepted for this POC)
 
@@ -62,3 +63,6 @@ Claude Code app is open; if closed at run time, it fires on next launch.
 - No EdStem lecture-watch-progress integration yet (phase 2, see design spec's
   Future Enhancements section).
 - Single user, `localhost`-only web app, no auth, no deployment.
+- No automatic/scheduled checks — you must ask Claude to check Canvas each
+  time; nothing runs in the background. This is a deliberate tradeoff, not
+  a bug (see design spec Amendment 2).
