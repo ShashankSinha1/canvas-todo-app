@@ -23,7 +23,11 @@ def send_message(text: str) -> None:
 
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
     try:
-        response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+        response = requests.post(
+            url,
+            data={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=15,
+        )
     except requests.exceptions.RequestException as exc:
         raise TelegramError(f"Telegram request failed: {type(exc).__name__}") from exc
 

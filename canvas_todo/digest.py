@@ -45,7 +45,12 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
 
     digest_parts = [f"📋 Weekly Canvas Digest ({wk})\n"]
     for course, sections in by_course.items():
-        digest_parts.append(f"\n**{course}**")
+        # Single-asterisk bold for Telegram's legacy "Markdown" parse mode (see
+        # telegram_client.send_message). Accepted residual risk: if a course name
+        # itself contains a literal "*" or "_", Telegram's Markdown parsing could
+        # misinterpret it — this fails cleanly with a TelegramError rather than
+        # crashing or corrupting data, so it's out of scope to fully escape here.
+        digest_parts.append(f"\n*{course}*")
         if sections["due"]:
             digest_parts.append("Due this week:\n" + "\n".join(sections["due"]))
         if sections["overdue"]:

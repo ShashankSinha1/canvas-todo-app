@@ -18,6 +18,7 @@ def test_send_message_posts_to_telegram_api(mock_post):
     assert "test-bot-token" in args[0]
     assert kwargs["data"]["chat_id"] == "12345"
     assert kwargs["data"]["text"] == "hello"
+    assert kwargs["data"]["parse_mode"] == "Markdown"
 
 
 @patch("canvas_todo.telegram_client.requests.post")

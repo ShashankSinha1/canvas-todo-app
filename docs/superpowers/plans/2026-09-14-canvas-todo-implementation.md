@@ -1471,7 +1471,12 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
 
     digest_parts = [f"📋 Weekly Canvas Digest ({wk})\n"]
     for course, sections in by_course.items():
-        digest_parts.append(f"\n**{course}**")
+        # Single-asterisk bold for Telegram's legacy "Markdown" parse mode (see
+        # telegram_client.send_message). Accepted residual risk: if a course name
+        # itself contains a literal "*" or "_", Telegram's Markdown parsing could
+        # misinterpret it — this fails cleanly with a TelegramError rather than
+        # crashing or corrupting data, so it's out of scope to fully escape here.
+        digest_parts.append(f"\n*{course}*")
         if sections["due"]:
             digest_parts.append("Due this week:\n" + "\n".join(sections["due"]))
         if sections["overdue"]:
@@ -1514,6 +1519,11 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
+
+Note: the course-header line originally read `f"\n**{course}**"` (double-asterisk, CommonMark-style
+bold). Post-PR review found this rendered as literal `**text**` in Telegram, since `telegram_client.py`
+never told the Bot API to parse Markdown — see "Post-PR Review Fixes" below for the fix (single
+asterisk + `parse_mode`).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1559,6 +1569,7 @@ def test_send_message_posts_to_telegram_api(mock_post):
     assert "test-bot-token" in args[0]
     assert kwargs["data"]["chat_id"] == "12345"
     assert kwargs["data"]["text"] == "hello"
+    assert kwargs["data"]["parse_mode"] == "Markdown"
 
 
 @patch("canvas_todo.telegram_client.requests.post")
@@ -1643,7 +1654,11 @@ def send_message(text: str) -> None:
 
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
     try:
-        response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+        response = requests.post(
+            url,
+            data={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=15,
+        )
     except requests.exceptions.RequestException as exc:
         raise TelegramError(f"Telegram request failed: {type(exc).__name__}") from exc
 
@@ -1667,6 +1682,10 @@ if __name__ == "__main__":
 ```
 
 Note: `main()` applies the same `try/except Exception` → clean JSON error → `sys.exit(1)` pattern established in Tasks 5–7, for consistency across all the project's CLIs even though nothing downstream currently parses this particular CLI's output.
+
+Note: `parse_mode: "Markdown"` was added post-PR review — see "Post-PR Review Fixes" below. Without it,
+`digest.py`'s `*course*` bold markers (and any future Markdown-style formatting) render as literal
+asterisks in the Telegram message rather than bold text.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2473,6 +2492,35 @@ Replace the existing bullet about "No EdStem..." list to also note:
 git add canvas_todo/manual_ingest.py tests/test_manual_ingest.py .env.template README.md
 git commit -m "feat: replace REST/token Canvas access with manually-triggered Chrome-extension ingestion"
 ```
+
+---
+
+### Post-PR Review Fixes
+
+An independent post-PR review of the branch (PR #1) found two real bugs, fixed here as follow-up
+commits rather than by reopening the original tasks:
+
+**`upsert_ungraded.py` missing the `--items-file` escape hatch (Task 6).** `manual_ingest.py`
+(Task 16) was specifically given a `--data-file` option after a live-reproduced bug showed
+`--data-json` corrupting/breaking on real Canvas text containing apostrophes ("don't",
+"professor's") when embedded in a shell command. `upsert_ungraded.py` — which persists
+LLM-extracted ungraded to-do titles and is arguably even more exposed to raw announcement text —
+never got the equivalent fix. Added `--items-file`, mutually exclusive with `--items-json`, both
+in a required group, mirroring `manual_ingest.py`'s exact pattern. Two tests added: reading items
+from a file end-to-end, and confirming argparse enforces exactly one of the two flags (exit code 2).
+
+**Telegram digest showing literal `**text**` instead of bold (Tasks 7 and 8).** `digest.py` built
+course headers with CommonMark-style double-asterisk bold, but `telegram_client.py`'s
+`send_message` never set a `parse_mode` on the Bot API request, so Telegram rendered the literal
+asterisks instead of bold text. Fixed by switching to Telegram's legacy `Markdown` parse mode
+(single-asterisk `*bold*`) rather than `MarkdownV2`, since `MarkdownV2` requires escaping most
+punctuation in every course/assignment name and course names can contain colons, parentheses, etc.
+— using it would trade one bug for a new parsing-failure bug. Changed the course-header line to
+single-asterisk in `digest.py` and added `"parse_mode": "Markdown"` to the POST payload in
+`telegram_client.py`. Accepted residual risk (documented in a code comment, not fixed): a course or
+assignment name containing a literal `*` or `_` could still confuse Telegram's Markdown parser —
+this fails cleanly with a `TelegramError` rather than crashing or corrupting data, so escaping it
+fully is out of scope for this POC.
 
 ---
 
