@@ -350,6 +350,39 @@ def test_get_items_for_week_returns_rows(conn):
     rows = db.get_items_for_week(conn, "2026-09-14")
     assert len(rows) == 1
     assert rows[0]["title"] == "Homework 1"
+
+
+def test_upsert_graded_item_rejects_invalid_status(conn):
+    with pytest.raises(ValueError):
+        db.upsert_graded_item(
+            conn, course_name="CS101", title="Homework 1", due_at="2026-09-18T23:59:00Z",
+            status="bogus", canvas_assignment_id=555, created_week="2026-09-14",
+        )
+
+
+def test_get_items_for_week_includes_unresolved_items_from_prior_weeks(conn):
+    # Overdue item created in a prior week must still show up now (the bug this fix addresses)
+    overdue_id = db.upsert_graded_item(
+        conn, course_name="CS101", title="Late Homework", due_at="2026-09-10T23:59:00Z",
+        status="overdue", canvas_assignment_id=111, created_week="2026-09-07",
+    )
+    # Pending ungraded item created in a prior week, never checked off, must still show up now
+    pending_ungraded_id, _ = db.upsert_ungraded_item(
+        conn, course_name="CS101", title="Watch Lecture 2", due_at=None,
+        created_week="2026-09-07",
+    )
+    # A done item from a prior week should NOT show up in the current week's view
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Old Finished Homework", due_at="2026-09-05T23:59:00Z",
+        status="done", canvas_assignment_id=222, created_week="2026-08-31",
+    )
+
+    rows = db.get_items_for_week(conn, "2026-09-14")
+    ids = {row["id"] for row in rows}
+
+    assert overdue_id in ids
+    assert pending_ungraded_id in ids
+    assert len(rows) == 2
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -492,9 +525,9 @@ def toggle_item(conn: sqlite3.Connection, item_id: int) -> str:
 def get_items_for_week(conn: sqlite3.Connection, week_of: str) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT * FROM items
-           WHERE created_week = ? OR (due_at IS NOT NULL AND date(due_at) >= date(?))
+           WHERE created_week = ? OR status != 'done'
            ORDER BY course_name, due_at IS NULL, due_at""",
-        (week_of, week_of),
+        (week_of,),
     ).fetchall()
 
 
@@ -535,6 +568,8 @@ git commit -m "feat: add SQLite data layer with graded/ungraded upsert and toggl
 ---
 
 ### Task 4: Canvas API Client
+
+> **SUPERSEDED (2026-09-16) — see `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** Georgia Tech blocks student API tokens, and the follow-up session-cookie and token-free-feed approaches were each abandoned in turn (see Amendments 1 and 2). The module built by this task was removed in Task 16 and replaced by manually-triggered Chrome-extension ingestion + `canvas_todo/manual_ingest.py`. Left below as a historical record of what was originally built, reviewed, and later retired — do not re-implement from this section.
 
 **Files:**
 - Create: `canvas_todo/canvas_client.py`
@@ -588,6 +623,28 @@ def test_get_paginated_follows_next_link(mock_get):
 
 
 @patch("canvas_todo.canvas_client.requests.get")
+def test_get_paginated_handles_realistic_multi_link_header(mock_get):
+    multi_link_header = (
+        '<https://example.instructure.com/api/v1/courses?page=1>; rel="current", '
+        '<https://example.instructure.com/api/v1/courses?page=2>; rel="next", '
+        '<https://example.instructure.com/api/v1/courses?page=5>; rel="last"'
+    )
+    page1 = _fake_response([{"id": 1}], link_header=multi_link_header)
+    page2 = _fake_response([{"id": 2}])  # last page, no Link header
+    mock_get.side_effect = [page1, page2]
+
+    courses = canvas_client.get_active_courses()
+    assert courses == [{"id": 1}, {"id": 2}]
+    assert mock_get.call_count == 2
+
+
+def test_get_active_courses_raises_clear_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("CANVAS_API_TOKEN", raising=False)
+    with pytest.raises(canvas_client.CanvasAPIError, match="CANVAS_API_TOKEN"):
+        canvas_client.get_active_courses()
+
+
+@patch("canvas_todo.canvas_client.requests.get")
 def test_get_active_courses_raises_on_error(mock_get):
     mock_get.return_value = _fake_response({"errors": "bad token"}, status_code=401)
     with pytest.raises(canvas_client.CanvasAPIError):
@@ -632,12 +689,19 @@ class CanvasAPIError(Exception):
 
 
 def _base_url() -> str:
-    url = os.environ["CANVAS_API_URL"].rstrip("/")
-    return f"{url}/api/v1"
+    try:
+        url = os.environ["CANVAS_API_URL"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_URL is not set (check your .env file)") from exc
+    return f"{url.rstrip('/')}/api/v1"
 
 
 def _headers() -> dict:
-    return {"Authorization": f"Bearer {os.environ['CANVAS_API_TOKEN']}"}
+    try:
+        token = os.environ["CANVAS_API_TOKEN"]
+    except KeyError as exc:
+        raise CanvasAPIError("CANVAS_API_TOKEN is not set (check your .env file)") from exc
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _parse_next_link(link_header: str | None) -> str | None:
@@ -698,7 +762,7 @@ def get_announcements(course_ids: list[int], since_days: int = 7) -> list[dict]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_canvas_client.py -v`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -710,6 +774,8 @@ git commit -m "feat: add Canvas REST API client with pagination"
 ---
 
 ### Task 5: Ingestion CLI
+
+> **SUPERSEDED (2026-09-16) — see `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** This module depended on Task 4's retired `canvas_client.py`. Removed in Task 16 and replaced by `canvas_todo/manual_ingest.py`, which persists data Claude reads live via the Chrome extension rather than fetching it itself. Left below as historical record — do not re-implement from this section.
 
 **Files:**
 - Create: `canvas_todo/ingest.py`
@@ -850,6 +916,43 @@ def test_run_ingest_upserts_graded_items_and_returns_announcements(
     run_row = conn.execute("SELECT * FROM weekly_runs").fetchone()
     assert run_row is not None
     assert json.loads(run_row["raw_announcement_snapshot"]) == result["announcements"]
+
+
+def test_run_ingest_falls_back_to_unknown_course_for_unrecognized_context_code(conn, sample_courses):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    weird_announcement = [
+        {
+            "context_code": "group_999",
+            "title": "Study Group Reminder",
+            "message": "Don't forget the study group meets Friday.",
+            "posted_at": "2026-09-14T09:00:00Z",
+        }
+    ]
+    with patch("canvas_todo.ingest.canvas_client.get_active_courses", return_value=sample_courses), \
+         patch("canvas_todo.ingest.canvas_client.get_assignments_with_submissions", return_value=[]), \
+         patch("canvas_todo.ingest.canvas_client.get_announcements", return_value=weird_announcement):
+        result = ingest.run_ingest(conn, now=now)
+
+    assert result["announcements"][0]["course_name"] == "Unknown"
+
+
+def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["ingest.py", "--db", db_path])
+
+    def _boom(conn, now=None):
+        raise ValueError("simulated unexpected failure")
+
+    with patch("canvas_todo.ingest.run_ingest", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            ingest.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "simulated unexpected failure"}
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -939,7 +1042,7 @@ def main() -> None:
     db.init_db(conn)
     try:
         result = run_ingest(conn)
-    except canvas_client.CanvasAPIError as exc:
+    except Exception as exc:
         print(json.dumps({"error": str(exc)}))
         sys.exit(1)
     print(json.dumps(result))
@@ -952,7 +1055,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_ingest.py -v`
-Expected: 5 passed
+Expected: 7 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1014,6 +1117,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from canvas_todo import db
 from canvas_todo.dateutils import utc_now, week_of
@@ -1039,18 +1143,33 @@ def main() -> None:
         description="Upsert ungraded to-do items extracted from Canvas announcements"
     )
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--items-json",
-        required=True,
-        help='JSON array, e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+        help='JSON array inline (only safe for data with no quotes/apostrophes — prefer --items-file), '
+        'e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+    )
+    group.add_argument(
+        "--items-file",
+        help="Path to a file containing the JSON array (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement-derived titles)",
     )
     args = parser.parse_args()
 
-    items = json.loads(args.items_json)
     conn = db.get_connection(args.db)
     db.init_db(conn)
     wk = week_of(utc_now())
-    result = upsert_items(conn, items, wk)
+    try:
+        if args.items_file:
+            with open(args.items_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.items_json
+        items = json.loads(raw)
+        result = upsert_items(conn, items, wk)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     print(json.dumps(result))
 
 
@@ -1058,12 +1177,98 @@ if __name__ == "__main__":
     main()
 ```
 
+This CLI's input is populated by an LLM (extracting ungraded to-do items from Canvas announcement
+text read live via the Chrome extension), which is inherently probabilistic and, per the Post-PR
+Review Fixes note below, may contain apostrophes/quotes that break shell-quoted `--items-json`.
+`main()` therefore accepts a required mutually-exclusive `--items-json`/`--items-file` group
+(mirroring `manual_ingest.py`'s pattern from Task 16) and wraps JSON parsing plus the upsert loop
+in a broad `try/except` so that malformed JSON or an item missing a required key
+(`course_name`/`title`) produces a clean `{"error": ...}` JSON line on stdout and exits 1, instead
+of an uncaught traceback with no output — matching the pattern established in Task 5's
+`ingest.py::main()`.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
 Expected: 1 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add error-handling and `--items-file` tests**
+
+Append to `tests/test_upsert_ungraded.py` (requires adding `import json` at the top,
+alongside the existing `sqlite3`, `pytest`, and `upsert_ungraded` imports):
+
+```python
+def test_main_prints_clean_json_error_on_malformed_json(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-json", "not valid json{"]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_reads_from_items_file(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    items_file = tmp_path / "items.json"
+    items = [{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": None}]
+    items_file.write_text(json.dumps(items))
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-file", str(items_file)]
+    )
+    upsert_ungraded.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert len(printed["created"]) == 1
+
+
+def test_main_requires_exactly_one_of_items_json_or_items_file(tmp_path, monkeypatch):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["upsert_ungraded.py", "--db", db_path])
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+    assert exc_info.value.code == 2
+
+
+def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    bad_items_json = json.dumps([{"course_name": "CS101"}])  # missing "title"
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-json", bad_items_json]
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+```
+
+Note: `test_main_reads_from_items_file` and `test_main_requires_exactly_one_of_items_json_or_items_file`
+were added post-PR-review (see "Post-PR Review Fixes" below) — `--items-file` did not exist when this
+task was originally implemented.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
+Expected: 5 passed
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add canvas_todo/upsert_ungraded.py tests/test_upsert_ungraded.py
@@ -1142,7 +1347,74 @@ def test_build_digest_marks_new_items_with_marker(conn):
     now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
     result = digest.build_digest(conn, "2026-09-14", now)
     assert "🆕" in result["digest_text"]
+
+
+def test_main_prints_clean_json_error_on_unexpected_exception(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["digest.py", "--db", db_path])
+
+    def _boom(conn, wk, now):
+        raise ValueError("simulated unexpected failure")
+
+    with patch("canvas_todo.digest.build_digest", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            digest.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "simulated unexpected failure"}
+
+
+def test_build_digest_routes_overdue_graded_item_to_overdue_section_only(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Late Quiz", due_at="2026-09-10T23:59:00Z",
+        status="overdue", canvas_assignment_id=1, created_week="2026-09-07",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "Overdue:" in result["digest_text"]
+    overdue_section = result["digest_text"].split("Overdue:")[1]
+    assert "Late Quiz" in overdue_section
+    due_section_present = "Due this week:" in result["digest_text"]
+    if due_section_present:
+        due_section = result["digest_text"].split("Due this week:")[1].split("Overdue:")[0]
+        assert "Late Quiz" not in due_section
+
+
+def test_new_marker_disappears_after_mark_reminded(conn):
+    item_id, _ = db.upsert_ungraded_item(
+        conn, course_name="CS101", title="Watch Lecture 4", due_at=None, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    first_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" in first_result["digest_text"]
+
+    db.mark_reminded(conn, first_result["reminded_ids"], now.isoformat())
+
+    second_result = digest.build_digest(conn, "2026-09-14", now)
+    assert "🆕" not in second_result["digest_text"]
+    assert "Watch Lecture 4" in second_result["digest_text"]
+
+
+def test_build_digest_omits_done_items_and_their_course_header(conn):
+    db.upsert_graded_item(
+        conn, course_name="CS101", title="Finished Homework", due_at="2026-09-12T23:59:00Z",
+        status="done", canvas_assignment_id=1, created_week="2026-09-14",
+    )
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    result = digest.build_digest(conn, "2026-09-14", now)
+
+    assert "CS101" not in result["digest_text"]
+    assert "Finished Homework" not in result["digest_text"]
+    assert result["reminded_ids"] == []
 ```
+
+Note: this test needs `import json` and `from unittest.mock import patch` added to this file's imports (alongside the existing `sqlite3`, `datetime`, `pytest` imports) — this follows the same `try/except Exception` error-handling pattern established in `ingest.py::main()` (Task 5) and `upsert_ungraded.py::main()` (Task 6), applied here proactively for consistency rather than waiting for a review cycle to flag the same gap a third time. The three additional tests above (overdue routing, marker clearing after `mark_reminded`, and `done`-item omission) were added during code review to close coverage gaps and lock in the Step 3 fix for dangling empty course headers.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1156,6 +1428,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timedelta
 
 from canvas_todo import db
@@ -1172,6 +1445,9 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
     reminded_ids = []
 
     for item in items:
+        if item["status"] == "done":
+            continue
+
         course = item["course_name"]
         by_course.setdefault(course, {"due": [], "overdue": [], "not_checked": []})
         reminded_ids.append(item["id"])
@@ -1195,7 +1471,12 @@ def build_digest(conn, wk: str, now: datetime) -> dict:
 
     digest_parts = [f"📋 Weekly Canvas Digest ({wk})\n"]
     for course, sections in by_course.items():
-        digest_parts.append(f"\n**{course}**")
+        # Single-asterisk bold for Telegram's legacy "Markdown" parse mode (see
+        # telegram_client.send_message). Accepted residual risk: if a course name
+        # itself contains a literal "*" or "_", Telegram's Markdown parsing could
+        # misinterpret it — this fails cleanly with a TelegramError rather than
+        # crashing or corrupting data, so it's out of scope to fully escape here.
+        digest_parts.append(f"\n*{course}*")
         if sections["due"]:
             digest_parts.append("Due this week:\n" + "\n".join(sections["due"]))
         if sections["overdue"]:
@@ -1216,10 +1497,22 @@ def main() -> None:
 
     conn = db.get_connection(args.db)
     db.init_db(conn)
-    now = utc_now()
-    wk = week_of(now)
-    result = build_digest(conn, wk, now)
-    db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
+    try:
+        now = utc_now()
+        wk = week_of(now)
+        result = build_digest(conn, wk, now)
+        # Marked as "reminded" here, before Telegram delivery is attempted (Task 8).
+        # Accepted tradeoff for this POC: if the send fails, these items won't show
+        # the 🆕 marker on a retry, but they still reappear in every future digest
+        # until resolved (get_items_for_week never drops unresolved items). Moving
+        # this to fire only after confirmed delivery would require passing ids
+        # through the scheduled agent's orchestration across two separate CLI
+        # invocations (digest.py then telegram_client.py) — not worth the added
+        # complexity for a single-user POC.
+        db.mark_reminded(conn, result["reminded_ids"], now.isoformat())
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
     print(json.dumps({"digest_text": result["digest_text"], "urgent_text": result["urgent_text"]}))
 
 
@@ -1227,10 +1520,15 @@ if __name__ == "__main__":
     main()
 ```
 
+Note: the course-header line originally read `f"\n**{course}**"` (double-asterisk, CommonMark-style
+bold). Post-PR review found this rendered as literal `**text**` in Telegram, since `telegram_client.py`
+never told the Bot API to parse Markdown — see "Post-PR Review Fixes" below for the fix (single
+asterisk + `parse_mode`).
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_digest.py -v`
-Expected: 3 passed
+Expected: 7 passed (3 core tests + 1 error-handling test, added proactively per the Task 5/6 `main()` error-handling precedent, + 3 code-review tests covering overdue routing, marker clearing after `mark_reminded`, and `done`-item omission)
 
 - [ ] **Step 5: Commit**
 
@@ -1271,14 +1569,57 @@ def test_send_message_posts_to_telegram_api(mock_post):
     assert "test-bot-token" in args[0]
     assert kwargs["data"]["chat_id"] == "12345"
     assert kwargs["data"]["text"] == "hello"
+    assert kwargs["data"]["parse_mode"] == "Markdown"
 
 
 @patch("canvas_todo.telegram_client.requests.post")
 def test_send_message_raises_on_failure(mock_post):
     mock_post.return_value = MagicMock(status_code=400, text="bad request")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(telegram_client.TelegramError):
         telegram_client.send_message("hello")
+
+
+def test_main_prints_clean_json_error_on_send_failure(monkeypatch, capsys):
+    import sys as sys_module
+
+    monkeypatch.setattr(sys_module, "argv", ["telegram_client.py", "--message", "hello"])
+
+    def _boom(text):
+        raise telegram_client.TelegramError("Telegram send failed: 400 bad request")
+
+    with patch("canvas_todo.telegram_client.send_message", side_effect=_boom):
+        with pytest.raises(SystemExit) as exc_info:
+            telegram_client.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert printed == {"error": "Telegram send failed: 400 bad request"}
+
+
+def test_send_message_raises_clear_error_when_token_missing(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    with pytest.raises(telegram_client.TelegramError, match="TELEGRAM_BOT_TOKEN"):
+        telegram_client.send_message("hello")
+
+
+def test_send_message_sanitizes_connection_error():
+    import requests as requests_module
+
+    with patch(
+        "canvas_todo.telegram_client.requests.post",
+        side_effect=requests_module.exceptions.ConnectionError(
+            "Max retries exceeded with url: /botREALSECRETTOKEN12345/sendMessage (Caused by ...)"
+        ),
+    ):
+        with pytest.raises(telegram_client.TelegramError) as exc_info:
+            telegram_client.send_message("hello")
+
+    assert "REALSECRETTOKEN12345" not in str(exc_info.value)
+    assert "ConnectionError" in str(exc_info.value)
 ```
+
+Note: this test file needs `import json` added at the top alongside the other imports.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1291,43 +1632,71 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'canvas_todo.telegram_
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
 
 import requests
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
+class TelegramError(Exception):
+    pass
+
+
 def send_message(text: str) -> None:
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    try:
+        bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+        chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    except KeyError as exc:
+        raise TelegramError(f"{exc.args[0]} is not set (check your .env file)") from exc
+
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
-    response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=15)
+    try:
+        response = requests.post(
+            url,
+            data={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise TelegramError(f"Telegram request failed: {type(exc).__name__}") from exc
+
     if response.status_code != 200:
-        raise RuntimeError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
+        raise TelegramError(f"Telegram send failed: {response.status_code} {response.text[:200]}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Send a Telegram message")
     parser.add_argument("--message", required=True, help="Message text to send")
     args = parser.parse_args()
-    send_message(args.message)
+    try:
+        send_message(args.message)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
 ```
 
+Note: `main()` applies the same `try/except Exception` → clean JSON error → `sys.exit(1)` pattern established in Tasks 5–7, for consistency across all the project's CLIs even though nothing downstream currently parses this particular CLI's output.
+
+Note: `parse_mode: "Markdown"` was added post-PR review — see "Post-PR Review Fixes" below. Without it,
+`digest.py`'s `*course*` bold markers (and any future Markdown-style formatting) render as literal
+asterisks in the Telegram message rather than bold text.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_telegram_client.py -v`
-Expected: 2 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add canvas_todo/telegram_client.py tests/test_telegram_client.py
-git commit -m "feat: add Telegram message-sending CLI"
+git commit -m "feat: add Telegram message-sending CLI with clean error handling"
 ```
 
 ---
@@ -1468,9 +1837,12 @@ from flask import Flask, jsonify, render_template
 from canvas_todo import db
 from canvas_todo.dateutils import utc_now, week_of
 
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TEMPLATE_DIR = os.path.join(os.path.dirname(_PACKAGE_DIR), "templates")
+
 
 def create_app(db_path: str) -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder=_TEMPLATE_DIR)
     app.config["DB_PATH"] = db_path
 
     @app.route("/")
@@ -1503,6 +1875,8 @@ if __name__ == "__main__":
     app = create_app(os.environ.get("CANVAS_TODO_DB", "canvas_todo.db"))
     app.run(debug=True)
 ```
+
+Note: `Flask(__name__, template_folder=_TEMPLATE_DIR)` is required here, not `Flask(__name__)`. Since `web.py` lives inside the `canvas_todo` package, Flask's default template-folder resolution looks for `canvas_todo/templates/`, not the top-level `templates/` directory this task creates — verified empirically during implementation (`Flask('canvas_todo.web').root_path` resolves to the `canvas_todo/` directory itself). `_TEMPLATE_DIR` is computed as the `templates/` directory one level up from the package, keeping the top-level layout the plan specifies while making `render_template` actually find the file.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1603,12 +1977,14 @@ git commit -m "docs: add setup and usage README"
 
 ### Task 11: Register the Scheduled Agent
 
+> **NOT EXECUTED — superseded (2026-09-16) by `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2."** Canvas access is now manually-triggered only (via the Chrome extension in a live conversation) — there is deliberately no scheduled/unattended automation, since that was the specific pattern rejected on security-control-circumvention grounds for the two prior Canvas-access approaches. This task is never executed. See Task 16 for what replaced it.
+
 This step registers the daily automation using this platform's built-in scheduled-task tool. It must run **after** Tasks 1–10 are complete (the prompt below assumes the venv, `.env`, and all CLI modules already exist and work).
 
 - [ ] **Step 1: Confirm prerequisites**
 
-Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env`
-Expected: both paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in real Canvas + Telegram credentials before proceeding — the scheduled agent will fail every run without them.
+Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env ~/canvas-todo-app/courses.json`
+Expected: all three paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in your Canvas Calendar Feed URL and Telegram credentials. If `courses.json` doesn't exist yet, create it listing each active course's name and Announcements feed URL (see the README and Task 12 below) — the scheduled agent will fail every run without both.
 
 - [ ] **Step 2: Call `create_scheduled_task`**
 
@@ -1621,14 +1997,16 @@ Call the `create_scheduled_task` tool with exactly these arguments:
 - `prompt`:
 
 ```
-You are running the daily Canvas weekly check-in for shashank.wmr@gmail.com. Work entirely inside ~/canvas-todo-app. A Python virtualenv already exists at ~/canvas-todo-app/venv; use ~/canvas-todo-app/venv/bin/python for every script invocation below. The SQLite database is at ~/canvas-todo-app/canvas_todo.db. Environment variables (Canvas + Telegram credentials) live in ~/canvas-todo-app/.env and must be loaded in the SAME bash call as each script invocation, since exported variables don't persist between separate tool calls — prefix every command with `set -a && source ~/canvas-todo-app/.env && set +a &&`.
+You are running the daily Canvas weekly check-in for shashank.wmr@gmail.com. Work entirely inside ~/canvas-todo-app. A Python virtualenv already exists at ~/canvas-todo-app/venv; use ~/canvas-todo-app/venv/bin/python for every script invocation below. The SQLite database is at ~/canvas-todo-app/canvas_todo.db. Environment variables (Canvas + Telegram credentials) live in ~/canvas-todo-app/.env and must be loaded in the SAME bash call as each script invocation, since exported variables don't persist between separate tool calls. The `canvas_todo` package is also only importable when the shell's current directory is the project root (running it via `python -m` resolves the package relative to the working directory, not the venv's location) — for both reasons, prefix EVERY command below with `cd ~/canvas-todo-app && set -a && source .env && set +a &&`, never skip the `cd` even if a previous command in the same run already did it, since each tool call may start a fresh shell.
 
 Step 1 — Ingest Canvas data:
-Run: set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.ingest --db ~/canvas-todo-app/canvas_todo.db
+Run: cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.ingest --db canvas_todo.db
 
 This pulls active courses, upserts graded assignment status (submitted/overdue/pending) directly into the database, and prints JSON to stdout shaped like: {"week_of": "YYYY-MM-DD", "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}, ...]}.
 
-If this command exits non-zero or prints {"error": ...}, skip directly to Step 5 and send exactly one Telegram message: "⚠️ Couldn't reach Canvas today — didn't update your to-do list. Will retry tomorrow." Do not attempt Steps 2-4 in that case.
+If this command's JSON output includes `"session_expired": true`, skip directly to Step 5 and send exactly one Telegram message: "🔒 Your Canvas session has expired. Please run: cd ~/canvas-todo-app && venv/bin/python -m canvas_todo.canvas_login_setup — to log in again." Do not attempt Steps 2-4 in that case.
+
+If this command exits non-zero for any OTHER reason (and the output does not have `"session_expired": true`), skip directly to Step 5 and send exactly one Telegram message: "⚠️ Couldn't reach Canvas today — didn't update your to-do list. Will retry tomorrow." Do not attempt Steps 2-4 in that case.
 
 Step 2 — Extract ungraded to-do items from announcements:
 Read the "announcements" array from Step 1's output. For each announcement, read its "message" field (ignore any HTML markup) and decide whether it describes a concrete action the student needs to take that is NOT already a graded Canvas assignment — for example "watch Lecture 4 before Friday," "read Chapter 5 before class," "complete the practice problems (ungraded) by Monday." For each such action, build an object: {"course_name": <the announcement's course_name>, "title": <a short imperative phrase, e.g. "Watch Lecture 4">, "due_at": <an ISO 8601 date if the announcement states or clearly implies one, otherwise null>}.
@@ -1639,16 +2017,16 @@ If you extract zero items, skip Step 3 entirely and go to Step 4.
 
 Step 3 — Save the extracted items:
 Run the following, substituting a valid single-quoted JSON array for ITEMS_JSON containing every object you built in Step 2:
-set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.upsert_ungraded --db ~/canvas-todo-app/canvas_todo.db --items-json 'ITEMS_JSON'
+cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.upsert_ungraded --db canvas_todo.db --items-json 'ITEMS_JSON'
 
 Step 4 — Build the digest:
-Run: set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.digest --db ~/canvas-todo-app/canvas_todo.db
+Run: cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.digest --db canvas_todo.db
 
 This prints JSON shaped like: {"digest_text": "...", "urgent_text": "..." or null}.
 
 Step 5 — Send Telegram message(s):
 Always send one message with the digest_text from Step 4 (or the Canvas-unreachable message from Step 1's failure branch), using:
-set -a && source ~/canvas-todo-app/.env && set +a && ~/canvas-todo-app/venv/bin/python -m canvas_todo.telegram_client --message "TEXT_HERE"
+cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python -m canvas_todo.telegram_client --message "TEXT_HERE"
 
 If Step 4's urgent_text is not null, send it as a second, separate call to the same command with the urgent_text as the message.
 
@@ -1674,10 +2052,483 @@ git commit -m "docs: note scheduled task registration"
 
 ---
 
+## Amendment 2 (2026-09-16): Manually-Triggered Ingestion via Chrome Extension
+
+Supersedes Tasks 4, 5, and 11 above (left in place as historical record, each marked SUPERSEDED/NOT EXECUTED). See `docs/superpowers/specs/2026-09-14-canvas-todo-design.md`, "Amendment 2," for full rationale: Georgia Tech blocks student API tokens; a session-cookie approach and a token-free-feed approach were each considered and abandoned; the resolution is that Claude reads Canvas live via the Chrome extension **only when the user actively asks in conversation**, never on an unattended schedule.
+
+### Task 16: Retire REST Canvas Client, Add Manual Ingestion CLI
+
+**Files:**
+- Delete: `canvas_todo/canvas_client.py`
+- Delete: `canvas_todo/ingest.py`
+- Delete: `tests/test_canvas_client.py`
+- Delete: `tests/test_ingest.py`
+- Delete: `tests/fixtures/sample_courses.json`
+- Delete: `tests/fixtures/sample_assignments.json`
+- Delete: `tests/fixtures/sample_announcements.json`
+- Create: `canvas_todo/manual_ingest.py`
+- Test: `tests/test_manual_ingest.py`
+- Modify: `.env.template`
+- Modify: `README.md`
+
+- [ ] **Step 1: Delete the retired REST-API modules and their tests/fixtures**
+
+```bash
+git rm canvas_todo/canvas_client.py canvas_todo/ingest.py tests/test_canvas_client.py tests/test_ingest.py
+git rm -r tests/fixtures
+```
+
+- [ ] **Step 2: Run the full suite to confirm nothing else depends on the removed modules**
+
+Run: `venv/bin/pytest -q`
+Expected: passes with a reduced count (removing ~20 tests between the two deleted test files — confirm the actual number rather than assuming), zero import errors from any remaining module.
+
+- [ ] **Step 3: Write the failing tests**
+
+`tests/test_manual_ingest.py`:
+
+```python
+import json
+import sqlite3
+from datetime import datetime, timezone
+
+import pytest
+
+from canvas_todo import db, manual_ingest
+
+
+def test_compute_status_submitted_is_done():
+    assignment = {"submitted": True, "due_at": "2026-09-18T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "done"
+
+
+def test_compute_status_overdue_when_unsubmitted_past_due():
+    assignment = {"submitted": False, "due_at": "2026-09-10T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "overdue"
+
+
+def test_compute_status_pending_when_unsubmitted_and_upcoming():
+    assignment = {"submitted": False, "due_at": "2026-09-20T23:59:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "pending"
+
+
+def test_compute_status_pending_when_no_due_date():
+    assignment = {"submitted": False, "due_at": None}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    assert manual_ingest.compute_status(assignment, now) == "pending"
+
+
+@pytest.fixture
+def conn():
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    db.init_db(connection)
+    yield connection
+    connection.close()
+
+
+def test_run_manual_ingest_upserts_graded_items_and_records_announcements(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [
+            {
+                "course_name": "CS101",
+                "assignments": [
+                    {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+                    {"canvas_assignment_id": 2, "title": "Quiz 2", "due_at": "2026-09-10T23:59:00Z", "submitted": False},
+                    {"canvas_assignment_id": 3, "title": "Project Proposal", "due_at": "2026-09-15T23:59:00Z", "submitted": True},
+                ],
+            }
+        ],
+        "announcements": [
+            {"course_name": "CS101", "title": "Week 5", "message": "Watch Lecture 4", "posted_at": "2026-09-14T09:00:00Z"}
+        ],
+    }
+
+    result = manual_ingest.run_manual_ingest(conn, data, now=now)
+
+    rows = conn.execute("SELECT * FROM items WHERE type = 'graded'").fetchall()
+    assert len(rows) == 3
+    statuses = {row["title"]: row["status"] for row in rows}
+    assert statuses["Homework 1"] == "pending"
+    assert statuses["Quiz 2"] == "overdue"
+    assert statuses["Project Proposal"] == "done"
+
+    assert result["week_of"] == "2026-09-14"
+    assert result["announcements"] == data["announcements"]
+
+    run_row = conn.execute("SELECT * FROM weekly_runs").fetchone()
+    assert run_row is not None
+    assert json.loads(run_row["raw_announcement_snapshot"]) == data["announcements"]
+
+
+def test_run_manual_ingest_skips_assignments_without_due_date(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [
+            {
+                "course_name": "CS101",
+                "assignments": [
+                    {"canvas_assignment_id": 1, "title": "Undated Assignment", "due_at": None, "submitted": False},
+                ],
+            }
+        ],
+        "announcements": [],
+    }
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+    rows = conn.execute("SELECT * FROM items").fetchall()
+    assert len(rows) == 0
+
+
+def test_run_manual_ingest_re_upserts_existing_assignment_by_id(conn):
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+    data["courses"][0]["assignments"][0]["submitted"] = True
+    manual_ingest.run_manual_ingest(conn, data, now=now)
+
+    rows = conn.execute("SELECT * FROM items").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "done"
+
+
+def test_main_prints_clean_json_error_on_malformed_input(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", "not valid json{"]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_upserts_and_prints_result(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", json.dumps(data)]
+    )
+    manual_ingest.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "week_of" in printed
+
+
+def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    # Missing "course_name" — a structurally required field
+    data = {"courses": [{"assignments": [
+        {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False}
+    ]}]}
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-json", json.dumps(data)]
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "error" in printed
+
+
+def test_main_reads_from_data_file(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    data_file = tmp_path / "canvas_data.json"
+    data = {
+        "courses": [{"course_name": "CS101", "assignments": [
+            {"canvas_assignment_id": 1, "title": "Homework 1", "due_at": "2026-09-18T23:59:00Z", "submitted": False},
+        ]}],
+        "announcements": [],
+    }
+    data_file.write_text(json.dumps(data))
+    monkeypatch.setattr(
+        sys_module, "argv", ["manual_ingest.py", "--db", db_path, "--data-file", str(data_file)]
+    )
+    manual_ingest.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert "week_of" in printed
+
+
+def test_main_requires_exactly_one_of_data_json_or_data_file(tmp_path, monkeypatch):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["manual_ingest.py", "--db", db_path])
+    with pytest.raises(SystemExit) as exc_info:
+        manual_ingest.main()
+    assert exc_info.value.code == 2  # argparse's own exit code for a usage error
+```
+
+Note: the three additional tests above (`test_main_prints_clean_json_error_on_missing_required_key`,
+`test_main_reads_from_data_file`, and `test_main_requires_exactly_one_of_data_json_or_data_file`) were
+added during code review to close gaps flagged as an "Important" reliability risk: real Canvas
+announcement/title text routinely contains apostrophes and quotes, which corrupts or truncates
+`--data-json` when it's embedded in a shell command string. `--data-file` (Step 5) lets Claude write
+the JSON to a temp file via a file-writing tool — no shell interpretation involved — and pass just the
+path, eliminating the risk entirely.
+
+- [ ] **Step 4: Run tests to verify they fail**
+
+Run: `venv/bin/pytest tests/test_manual_ingest.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'canvas_todo.manual_ingest'`
+
+- [ ] **Step 5: Implement `canvas_todo/manual_ingest.py`**
+
+```python
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime
+
+from canvas_todo import db
+from canvas_todo.dateutils import utc_now, week_of
+
+
+def compute_status(assignment: dict, now: datetime) -> str:
+    if assignment.get("submitted"):
+        return "done"
+    due_at = assignment.get("due_at")
+    if due_at:
+        due_dt = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        if due_dt < now:
+            return "overdue"
+    return "pending"
+
+
+def run_manual_ingest(conn, data: dict, now: datetime | None = None) -> dict:
+    now = now or utc_now()
+    wk = week_of(now)
+
+    for course in data.get("courses", []):
+        course_name = course["course_name"]
+        for assignment in course.get("assignments", []):
+            due_at = assignment.get("due_at")
+            if due_at is None:
+                continue  # undated assignments aren't part of a "this week" view
+            db.upsert_graded_item(
+                conn,
+                course_name=course_name,
+                title=assignment["title"],
+                due_at=due_at,
+                status=compute_status(assignment, now),
+                canvas_assignment_id=assignment["canvas_assignment_id"],
+                created_week=wk,
+            )
+
+    announcements = data.get("announcements", [])
+    db.insert_weekly_run(
+        conn,
+        run_at=now.isoformat(),
+        week_of=wk,
+        raw_announcement_snapshot=json.dumps(announcements),
+    )
+    return {"week_of": wk, "announcements": announcements}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Persist Canvas data Claude read live via the Chrome extension"
+    )
+    parser.add_argument("--db", required=True, help="Path to SQLite database file")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--data-json",
+        help="JSON object inline (only safe for data with no quotes/apostrophes — prefer --data-file)",
+    )
+    group.add_argument(
+        "--data-file",
+        help="Path to a file containing the JSON object (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement text and course/assignment titles)",
+    )
+    args = parser.parse_args()
+
+    conn = db.get_connection(args.db)
+    db.init_db(conn)
+    try:
+        if args.data_file:
+            with open(args.data_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.data_json
+        data = json.loads(raw)
+        result = run_manual_ingest(conn, data)
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Note this module has NO dependency on `canvas_client.py` (deleted in Step 1) — it only depends on `db.py` and `dateutils.py`, both unchanged from Tasks 2-3. `compute_status` is intentionally similar to the old `ingest.py`'s version but reads a flat `submitted: bool` field instead of a nested `submission.submitted_at` structure, since Claude reports what it directly observes on the Canvas UI (a "Submitted"/"Not Submitted" indicator) rather than a raw API payload shape.
+
+`--data-json` and `--data-file` are a required mutually-exclusive group: argparse itself enforces
+exactly one of the two (exit code 2 with a usage message if neither or both are given), so `main()`
+doesn't need to handle that case manually. Reading `--data-file` happens inside the same
+`try/except Exception` block as JSON parsing, so a missing/unreadable file produces the same clean
+`{"error": ...}` + exit 1 as any other failure mode.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `venv/bin/pytest tests/test_manual_ingest.py -v`
+Expected: 12 passed (9 original + 3 code-review tests covering the missing-required-key error path,
+the new `--data-file` path end-to-end, and argparse's mutual-exclusion enforcement)
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `venv/bin/pytest -q`
+Expected: all tests pass, no import errors, no leftover references to the deleted modules anywhere in the test suite.
+
+- [ ] **Step 8: Update `.env.template`**
+
+Replace the "Canvas API" section (which previously had `CANVAS_API_URL`/`CANVAS_API_TOKEN`) — remove it entirely, since no Canvas credentials of any kind are needed anymore. New contents:
+
+```
+# Telegram
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+
+# App
+CANVAS_TODO_DB=canvas_todo.db
+```
+
+- [ ] **Step 9: Rewrite the relevant `README.md` sections**
+
+Replace the "One-time setup" step 1 (Canvas API token) and the entire "Scheduled daily agent" section. New content for "One-time setup":
+
+```markdown
+## One-time setup
+
+1. **Canvas access**: none needed! This app doesn't use a Canvas API token,
+   login, or session — Georgia Tech blocks student-generated tokens, so
+   instead you ask Claude (with the Chrome extension connected) to read
+   Canvas live through your own already-logged-in browser tab. See "Checking
+   your Canvas" below.
+2. **Telegram bot**:
+   - Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`,
+     follow the prompts. You'll get a bot token.
+   - Send any message to your new bot, then visit
+     `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser —
+     your `chat.id` is in the JSON response. That's your `TELEGRAM_CHAT_ID`.
+3. Copy `.env.template` to `.env` and fill in both Telegram values plus
+   `CANVAS_TODO_DB` (default `canvas_todo.db` is fine).
+4. Install dependencies:
+   ```bash
+   python3 -m venv venv
+   venv/bin/pip install -r requirements.txt
+   ```
+5. Run the test suite to confirm everything's wired up:
+   ```bash
+   venv/bin/pytest
+   ```
+```
+
+Replace "Running the daily check manually (without waiting for the schedule)" and "Scheduled daily agent" with:
+
+```markdown
+## Checking your Canvas
+
+There is no automatic daily check — ask Claude directly, in an active
+conversation, something like "check my Canvas" or "what's due this week."
+Claude uses the Chrome extension to read your courses, assignments, and
+announcements from your already-logged-in Canvas tab, then:
+
+1. Calls `canvas_todo.manual_ingest` to save graded-assignment status into
+   the database. To avoid shell-quoting issues with apostrophes/quotes in
+   real course and announcement text, Claude writes the JSON to a temp file
+   and passes it with `--data-file` rather than inlining it with `--data-json`.
+2. Reads announcement text and calls `canvas_todo.upsert_ungraded` for any
+   ungraded to-dos it finds (readings, lectures to watch, etc.).
+3. Calls `canvas_todo.digest` to build a summary and `canvas_todo.telegram_client`
+   to send it to you.
+
+This is deliberately not automated — see the design spec's "Amendment 2"
+for why (Georgia Tech blocks the kind of unattended automated access this
+would otherwise require).
+```
+
+- [ ] **Step 10: Update the "Known limitations" section**
+
+Replace the existing bullet about "No EdStem..." list to also note:
+
+```markdown
+- No automatic/scheduled checks — you must ask Claude to check Canvas each
+  time; nothing runs in the background. This is a deliberate tradeoff, not
+  a bug (see design spec Amendment 2).
+```
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add canvas_todo/manual_ingest.py tests/test_manual_ingest.py .env.template README.md
+git commit -m "feat: replace REST/token Canvas access with manually-triggered Chrome-extension ingestion"
+```
+
+---
+
+### Post-PR Review Fixes
+
+An independent post-PR review of the branch (PR #1) found two real bugs, fixed here as follow-up
+commits rather than by reopening the original tasks:
+
+**`upsert_ungraded.py` missing the `--items-file` escape hatch (Task 6).** `manual_ingest.py`
+(Task 16) was specifically given a `--data-file` option after a live-reproduced bug showed
+`--data-json` corrupting/breaking on real Canvas text containing apostrophes ("don't",
+"professor's") when embedded in a shell command. `upsert_ungraded.py` — which persists
+LLM-extracted ungraded to-do titles and is arguably even more exposed to raw announcement text —
+never got the equivalent fix. Added `--items-file`, mutually exclusive with `--items-json`, both
+in a required group, mirroring `manual_ingest.py`'s exact pattern. Two tests added: reading items
+from a file end-to-end, and confirming argparse enforces exactly one of the two flags (exit code 2).
+
+**Telegram digest showing literal `**text**` instead of bold (Tasks 7 and 8).** `digest.py` built
+course headers with CommonMark-style double-asterisk bold, but `telegram_client.py`'s
+`send_message` never set a `parse_mode` on the Bot API request, so Telegram rendered the literal
+asterisks instead of bold text. Fixed by switching to Telegram's legacy `Markdown` parse mode
+(single-asterisk `*bold*`) rather than `MarkdownV2`, since `MarkdownV2` requires escaping most
+punctuation in every course/assignment name and course names can contain colons, parentheses, etc.
+— using it would trade one bug for a new parsing-failure bug. Changed the course-header line to
+single-asterisk in `digest.py` and added `"parse_mode": "Markdown"` to the POST payload in
+`telegram_client.py`. Accepted residual risk (documented in a code comment, not fixed): a course or
+assignment name containing a literal `*` or `_` could still confuse Telegram's Markdown parser —
+this fails cleanly with a `TelegramError` rather than crashing or corrupting data, so escaping it
+fully is out of scope for this POC.
+
+---
+
 ## Definition of Done
 
 - [ ] `venv/bin/pytest` passes with 0 failures across all test files.
-- [ ] `venv/bin/python -m canvas_todo.web` serves a page at `localhost:5000` showing at least one real course after running `ingest` once with real credentials.
-- [ ] A manually-triggered run of `ingest` → `digest` → `telegram_client` results in a real Telegram message arriving.
-- [ ] `canvas-weekly-checkin` appears in `list_scheduled_tasks`, enabled, scheduled for 7:30am daily.
-- [ ] Toggling an ungraded item's checkbox in the web app persists across a page reload; toggling a graded item's (disabled) checkbox does nothing.
+- [ ] `venv/bin/python -m canvas_todo.web` serves a page at `localhost:5000` showing at least one real course after a manual Canvas check has been run once.
+- [ ] Asking Claude to "check my Canvas" in a live conversation results in `manual_ingest` → (optionally `upsert_ungraded`) → `digest` → `telegram_client` running in sequence and a real Telegram message arriving.
+- [ ] No scheduled task is registered for this project — confirm `list_scheduled_tasks` does not include `canvas-weekly-checkin` (or any Canvas-related task).
+- [ ] Toggling an ungraded item's checkbox in the web app persists across a page reload; a graded (auto-tracked) item's checkbox is disabled and `POST /items/<id>/toggle` against it returns 400 — auto-checkoff for graded assignments is restored under Amendment 2, not retired.
+- [ ] No file in the repository references `CANVAS_API_TOKEN`, `CANVAS_API_URL`, `canvas_session_profile`, or `courses.json` (grep to confirm) — all now-inapplicable artifacts from the abandoned approaches are fully removed.
