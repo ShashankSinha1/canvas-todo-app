@@ -99,6 +99,25 @@ Pragmatic, not exhaustive, given POC/single-user scope:
 - Integration tests for the Flask toggle endpoint against a temp SQLite file (toggle persists; graded items reject toggle).
 - Telegram sending and LLM announcement-parsing are verified manually (external API / non-deterministic reasoning), consistent with the accepted precision tradeoff above. No CI pipeline for this iteration.
 
+## Amendment (2026-09-16): Canvas Auth Pivot — Session Cookie via Persistent Browser Profile
+
+**Problem discovered during implementation:** Georgia Tech (the user's institution) disables student-generated Canvas API access tokens as institutional policy — this is not a bug or a missing setting, it's a deliberate FERPA/security-driven restriction confirmed across multiple peer institutions (GT, UW-Madison, UW, Texas A&M). The original design's assumption of a long-lived `CANVAS_API_TOKEN` (Bearer auth) is not viable for this user.
+
+**Options considered:** (1) request token access via GT's help desk — untried/uncertain turnaround; (2) fall back to token-free public feeds (iCal for due dates, RSS for announcements) — rejected because it loses submission-status data entirely, eliminating auto-checkoff for graded work, the single most-wanted feature; (3) pause the project; (4) authenticate via a real, persistent, cookie-based browser session instead of a token — **chosen**.
+
+**Decision:** Replace Bearer-token auth with session-cookie auth sourced from a **persistent Playwright browser profile**:
+
+- **One-time (and occasional re-run) manual setup**: the user runs a new interactive script (`canvas_todo/canvas_login_setup.py`) that opens a real, visible Chromium window via Playwright. The user logs into Canvas themselves — typing their GT password and completing Duo 2FA directly in that browser window; this script never sees or handles the password. On success, Playwright's persistent profile (cookies, local storage) is saved to disk at a fixed, gitignored path.
+- **Daily ingestion**: `canvas_client.py` loads cookies from that persistent profile into a `requests.Session` and calls the same public Canvas REST API endpoints as before — no change to which endpoints are called or how pagination/response parsing works, only how the request is authenticated.
+- **Session expiry is expected, not exceptional**: unlike an API token, this session will eventually expire (exact GT-specific duration unknown — dependent on Duo/SSO "remember this device" configuration, which is admin-set and undocumented for GT). When ingestion detects an expired/invalid session (HTTP 401, or a redirect to a login/SSO page instead of a JSON API response), it must raise a distinguishable error so the scheduled agent can send a specific "please log in again" Telegram alert rather than a generic failure message — the user should never have to notice via silence that something broke.
+
+**Accepted risks, explicitly surfaced to and approved by the user:**
+- A live session cookie is at least as sensitive as a password/token — arguably more directly so, since it *is* an active authenticated session. It is stored only in the local, gitignored Playwright profile directory, never committed, never logged.
+- This access pattern (automated use of a personal browser session against Canvas) is not an officially sanctioned integration path the way a Developer Key/OAuth flow would be — it sits in a gray area relative to Canvas's terms, mitigated by being read-only, single-user, and never sharing/redistributing the session.
+- "Persistent" is relative: this is expected to survive materially longer than a single manually-copied cookie snapshot (which could die same-day), but will still eventually require the user to re-run the login script — cadence unknown, could be days to weeks.
+
+**New dependency:** Playwright (plus a downloaded Chromium binary via `playwright install chromium`) — a materially heavier addition than the project's prior pure-`requests` stack. Accepted as a necessary cost for this user's institutional constraint.
+
 ## Future Enhancements (Explicitly Deferred)
 
 - **EdStem lecture-progress integration**: user wants percent-watched-per-lecture, not just Ed's binary checkmark. Deferred because Ed has no documented public API for this — would require inspecting Ed's internal (undocumented) endpoints via an authenticated session to confirm percentage data is even exposed (vs. only a binary completion flag), before committing to a scraping approach. Schema extension sketch: a `lecture_progress` table (`lecture_id`, `course_name`, `percent_watched`, `last_synced_at`) joined to `items` by lecture reference. Not built in this iteration.
