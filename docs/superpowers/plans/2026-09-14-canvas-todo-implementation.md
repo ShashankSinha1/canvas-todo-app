@@ -1914,8 +1914,8 @@ This step registers the daily automation using this platform's built-in schedule
 
 - [ ] **Step 1: Confirm prerequisites**
 
-Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env`
-Expected: both paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in real Canvas + Telegram credentials before proceeding — the scheduled agent will fail every run without them.
+Run: `ls ~/canvas-todo-app/venv/bin/python ~/canvas-todo-app/.env ~/canvas-todo-app/canvas_session_profile`
+Expected: all three paths exist. If `.env` doesn't exist yet, copy it from `.env.template` and fill in real values before proceeding. If `canvas_session_profile/` doesn't exist yet, run `cd ~/canvas-todo-app && venv/bin/python -m canvas_todo.canvas_login_setup` and complete the interactive Canvas login first (see Tasks 12-15 below and the README) — the scheduled agent will fail every run without a saved session.
 
 - [ ] **Step 2: Call `create_scheduled_task`**
 
@@ -1935,7 +1935,9 @@ Run: cd ~/canvas-todo-app && set -a && source .env && set +a && venv/bin/python 
 
 This pulls active courses, upserts graded assignment status (submitted/overdue/pending) directly into the database, and prints JSON to stdout shaped like: {"week_of": "YYYY-MM-DD", "announcements": [{"course_name": ..., "title": ..., "message": ..., "posted_at": ...}, ...]}.
 
-If this command exits non-zero or prints {"error": ...}, skip directly to Step 5 and send exactly one Telegram message: "⚠️ Couldn't reach Canvas today — didn't update your to-do list. Will retry tomorrow." Do not attempt Steps 2-4 in that case.
+If this command's JSON output includes `"session_expired": true`, skip directly to Step 5 and send exactly one Telegram message: "🔒 Your Canvas session has expired. Please run: cd ~/canvas-todo-app && venv/bin/python -m canvas_todo.canvas_login_setup — to log in again." Do not attempt Steps 2-4 in that case.
+
+If this command exits non-zero for any OTHER reason (and the output does not have `"session_expired": true`), skip directly to Step 5 and send exactly one Telegram message: "⚠️ Couldn't reach Canvas today — didn't update your to-do list. Will retry tomorrow." Do not attempt Steps 2-4 in that case.
 
 Step 2 — Extract ungraded to-do items from announcements:
 Read the "announcements" array from Step 1's output. For each announcement, read its "message" field (ignore any HTML markup) and decide whether it describes a concrete action the student needs to take that is NOT already a graded Canvas assignment — for example "watch Lecture 4 before Friday," "read Chapter 5 before class," "complete the practice problems (ungraded) by Monday." For each such action, build an object: {"course_name": <the announcement's course_name>, "title": <a short imperative phrase, e.g. "Watch Lecture 4">, "due_at": <an ISO 8601 date if the announcement states or clearly implies one, otherwise null>}.
