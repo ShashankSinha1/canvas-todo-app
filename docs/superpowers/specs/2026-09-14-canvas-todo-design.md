@@ -21,6 +21,8 @@ This is an explicit POC for a single user (shashank.wmr@gmail.com). Deployment, 
 
 ## Architecture
 
+**⚠️ Items 1-2 below are superseded by "Amendment 2" (end of document) — the CURRENT architecture has no REST ingestion module and no scheduled agent; ingestion happens only when the user asks Claude to check Canvas in a live conversation, via the Chrome extension. Item 3 (web app) is still accurate. Read Amendment 2 before implementing anything from this section.**
+
 Three components sharing one local SQLite database (`canvas_todo.db`):
 
 1. **Canvas ingestion module** (Python) — calls the Canvas REST API directly (same underlying API canvas-mcp wraps) to pull active courses, assignments + submission status, and the last 7 days of announcements.
@@ -29,7 +31,7 @@ Three components sharing one local SQLite database (`canvas_todo.db`):
 
 Rationale for one shared SQLite file: the scheduled agent and the web app must agree on reminder state and manual-checkoff state, or the user gets repeat texts for things already marked done.
 
-**Known constraint:** scheduled tasks on this platform only fire while the Claude Code app is open; if closed at run time, the run fires on next launch (may be late that day). Acceptable for a personal POC.
+**Known constraint:** scheduled tasks on this platform only fire while the Claude Code app is open; if closed at run time, the run fires on next launch (may be late that day). Acceptable for a personal POC. *(Moot under Amendment 2 — there is no scheduled task.)*
 
 ## Data Model
 
@@ -54,6 +56,8 @@ Upsert key: Canvas assignment ID for graded items; fuzzy match (course + normali
 Graded item `status` is fully re-derived from Canvas submission data on every run (no manual override). Ungraded item `status` changes only via the web app checkbox; the scheduled agent only adds new ones and reads current status — it never overwrites a user's manual "done."
 
 ## Canvas Ingestion & Announcement Parsing
+
+**⚠️ Superseded by Amendment 2 — there is no `GET /courses`/`GET /assignments`/`GET /announcements` REST access. Claude reads this data live via the Chrome extension instead, then calls `manual_ingest.py`/`upsert_ungraded.py`. The upsert/dedup mechanics described below (fuzzy-dedup, `raw_announcement_snapshot` audit trail) are still accurate — only the fetch mechanism changed.**
 
 Each run:
 
@@ -80,21 +84,28 @@ This step is inherently probabilistic. Precision is not a target for the POC —
 
 ## Setup & Credentials Required
 
-*(Updated 2026-09-16 — see Amendment above; this supersedes the original token-based list.)*
+**⚠️ SUPERSEDED — this section describes Amendment 1 (token-free feeds), which was itself abandoned before implementation. Do not follow these steps.** The actually-implemented, current requirements are in **Amendment 2** below: no Canvas credentials of any kind (no token, no calendar feed URL, no `courses.json`) — only a Telegram bot token/chat ID and the Chrome extension being connected. This section is kept only as a historical record of an intermediate design that was never built.
+
+<details>
+<summary>Historical: Amendment 1's setup steps (never implemented)</summary>
 
 1. **Canvas Calendar Feed URL** (Account → Settings → "Calendar Feed") — one-time copy into `.env`.
 2. **Per-course Announcements Feed URLs** — one per active course, found on each course's Announcements page; collected into a gitignored `courses.json` config file. Must be refreshed each semester when enrolled courses change.
 3. Telegram bot token (via @BotFather) + chat ID (captured once bot exists).
-4. canvas-mcp installed and configured locally for ad hoc/on-demand queries via Claude ("what's due this week") — this path is independent of the scheduled agent's feed-based ingestion and unaffected by this amendment.
+4. canvas-mcp installed and configured locally for ad hoc/on-demand queries via Claude ("what's due this week").
 
 All secrets/feed URLs in local, gitignored files (`.env`, `courses.json`), never hardcoded, never committed.
 
+</details>
+
 ## Error Handling & Edge Cases
 
-- **Canvas feed fetch failure** (network error, feed URL revoked/regenerated, unexpected format): run logs the error, does not update `items` for that run, and still sends a Telegram message noting Canvas was unreachable rather than going silent or sending stale data as if current.
-- **LLM misreads an announcement**: worst case is a spurious/missed to-do item, recoverable via the web app; `raw_announcement_snapshot` provides an audit trail.
-- **Claude Code app closed at scheduled run time**: run fires on next app launch instead (platform behavior, not fixable at this layer) — digest may arrive late.
-- **Duplicate Telegram sends**: prevented by the `last_reminded_at`-driven upsert logic, not by time-based dedup — a manual re-run of the agent does not double-send.
+**⚠️ The first and third bullets below are stale (reference feed fetching and a scheduled run, neither of which exist under Amendment 2). The second and fourth bullets are still accurate.**
+
+- ~~**Canvas feed fetch failure**...~~ *(N/A under Amendment 2 — there's no feed to fetch. If Claude can't read a Canvas page via the Chrome extension, it says so directly in the conversation.)*
+- **LLM misreads an announcement**: worst case is a spurious/missed to-do item, recoverable via the web app; `raw_announcement_snapshot` provides an audit trail. *(Still accurate.)*
+- ~~**Claude Code app closed at scheduled run time**...~~ *(N/A under Amendment 2 — there's no scheduled run; ingestion only happens when the user is actively in a conversation.)*
+- **Duplicate Telegram sends**: prevented by the `last_reminded_at`-driven upsert logic, not by time-based dedup — re-running the pipeline in the same conversation does not double-send. *(Still accurate.)*
 
 ## Testing Approach
 

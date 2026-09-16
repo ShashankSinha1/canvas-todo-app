@@ -2438,5 +2438,5 @@ git commit -m "feat: replace REST/token Canvas access with manually-triggered Ch
 - [ ] `venv/bin/python -m canvas_todo.web` serves a page at `localhost:5000` showing at least one real course after a manual Canvas check has been run once.
 - [ ] Asking Claude to "check my Canvas" in a live conversation results in `manual_ingest` → (optionally `upsert_ungraded`) → `digest` → `telegram_client` running in sequence and a real Telegram message arriving.
 - [ ] No scheduled task is registered for this project — confirm `list_scheduled_tasks` does not include `canvas-weekly-checkin` (or any Canvas-related task).
-- [ ] Toggling any item's checkbox in the web app (graded or ungraded — both are user-toggled now) persists across a page reload.
+- [ ] Toggling an ungraded item's checkbox in the web app persists across a page reload; a graded (auto-tracked) item's checkbox is disabled and `POST /items/<id>/toggle` against it returns 400 — auto-checkoff for graded assignments is restored under Amendment 2, not retired.
 - [ ] No file in the repository references `CANVAS_API_TOKEN`, `CANVAS_API_URL`, `canvas_session_profile`, or `courses.json` (grep to confirm) — all now-inapplicable artifacts from the abandoned approaches are fully removed.
