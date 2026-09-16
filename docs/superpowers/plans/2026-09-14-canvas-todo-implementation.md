@@ -1143,10 +1143,16 @@ def main() -> None:
         description="Upsert ungraded to-do items extracted from Canvas announcements"
     )
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--items-json",
-        required=True,
-        help='JSON array, e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+        help='JSON array inline (only safe for data with no quotes/apostrophes — prefer --items-file), '
+        'e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+    )
+    group.add_argument(
+        "--items-file",
+        help="Path to a file containing the JSON array (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement-derived titles)",
     )
     args = parser.parse_args()
 
@@ -1154,7 +1160,12 @@ def main() -> None:
     db.init_db(conn)
     wk = week_of(utc_now())
     try:
-        items = json.loads(args.items_json)
+        if args.items_file:
+            with open(args.items_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.items_json
+        items = json.loads(raw)
         result = upsert_items(conn, items, wk)
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
@@ -1166,19 +1177,22 @@ if __name__ == "__main__":
     main()
 ```
 
-This CLI's only input (`--items-json`) is populated by an LLM (the Task 11 scheduled agent
-extracting to-do items from Canvas announcement text), which is inherently probabilistic.
-`main()` therefore wraps JSON parsing and the upsert loop in a broad `try/except` so that
-malformed JSON or an item missing a required key (`course_name`/`title`) produces a clean
-`{"error": ...}` JSON line on stdout and exits 1, instead of an uncaught traceback with no
-output — matching the pattern established in Task 5's `ingest.py::main()`.
+This CLI's input is populated by an LLM (extracting ungraded to-do items from Canvas announcement
+text read live via the Chrome extension), which is inherently probabilistic and, per the Post-PR
+Review Fixes note below, may contain apostrophes/quotes that break shell-quoted `--items-json`.
+`main()` therefore accepts a required mutually-exclusive `--items-json`/`--items-file` group
+(mirroring `manual_ingest.py`'s pattern from Task 16) and wraps JSON parsing plus the upsert loop
+in a broad `try/except` so that malformed JSON or an item missing a required key
+(`course_name`/`title`) produces a clean `{"error": ...}` JSON line on stdout and exits 1, instead
+of an uncaught traceback with no output — matching the pattern established in Task 5's
+`ingest.py::main()`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
 Expected: 1 passed
 
-- [ ] **Step 5: Add error-handling tests**
+- [ ] **Step 5: Add error-handling and `--items-file` tests**
 
 Append to `tests/test_upsert_ungraded.py` (requires adding `import json` at the top,
 alongside the existing `sqlite3`, `pytest`, and `upsert_ungraded` imports):
@@ -1201,6 +1215,32 @@ def test_main_prints_clean_json_error_on_malformed_json(tmp_path, monkeypatch, c
     assert "error" in printed
 
 
+def test_main_reads_from_items_file(tmp_path, monkeypatch, capsys):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    items_file = tmp_path / "items.json"
+    items = [{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": None}]
+    items_file.write_text(json.dumps(items))
+    monkeypatch.setattr(
+        sys_module, "argv", ["upsert_ungraded.py", "--db", db_path, "--items-file", str(items_file)]
+    )
+    upsert_ungraded.main()
+    captured = capsys.readouterr()
+    printed = json.loads(captured.out)
+    assert len(printed["created"]) == 1
+
+
+def test_main_requires_exactly_one_of_items_json_or_items_file(tmp_path, monkeypatch):
+    import sys as sys_module
+
+    db_path = str(tmp_path / "test.db")
+    monkeypatch.setattr(sys_module, "argv", ["upsert_ungraded.py", "--db", db_path])
+    with pytest.raises(SystemExit) as exc_info:
+        upsert_ungraded.main()
+    assert exc_info.value.code == 2
+
+
 def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypatch, capsys):
     import sys as sys_module
 
@@ -1219,10 +1259,14 @@ def test_main_prints_clean_json_error_on_missing_required_key(tmp_path, monkeypa
     assert "error" in printed
 ```
 
+Note: `test_main_reads_from_items_file` and `test_main_requires_exactly_one_of_items_json_or_items_file`
+were added post-PR-review (see "Post-PR Review Fixes" below) — `--items-file` did not exist when this
+task was originally implemented.
+
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `venv/bin/pytest tests/test_upsert_ungraded.py -v`
-Expected: 3 passed
+Expected: 5 passed
 
 - [ ] **Step 7: Commit**
 

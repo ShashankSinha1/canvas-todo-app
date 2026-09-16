@@ -28,10 +28,16 @@ def main() -> None:
         description="Upsert ungraded to-do items extracted from Canvas announcements"
     )
     parser.add_argument("--db", required=True, help="Path to SQLite database file")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--items-json",
-        required=True,
-        help='JSON array, e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+        help='JSON array inline (only safe for data with no quotes/apostrophes — prefer --items-file), '
+        'e.g. \'[{"course_name": "CS101", "title": "Watch Lecture 4", "due_at": null}]\'',
+    )
+    group.add_argument(
+        "--items-file",
+        help="Path to a file containing the JSON array (recommended: avoids shell quoting issues "
+        "with apostrophes/quotes in real announcement-derived titles)",
     )
     args = parser.parse_args()
 
@@ -39,7 +45,12 @@ def main() -> None:
     db.init_db(conn)
     wk = week_of(utc_now())
     try:
-        items = json.loads(args.items_json)
+        if args.items_file:
+            with open(args.items_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+        else:
+            raw = args.items_json
+        items = json.loads(raw)
         result = upsert_items(conn, items, wk)
     except Exception as exc:
         print(json.dumps({"error": str(exc)}))
